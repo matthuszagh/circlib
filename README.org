@@ -1,0 +1,10 @@
+* About
+libcircuit is a library of electronic, PCB-based (sub)circuits written
+in SKiDL. They are meant to be easy to include within larger PCB
+designs. Additionally, each circuit is accompanied by SPICE/Xyce
+simulations and prototype PCB implementations. A writeup is provided
+alongside each PCB implementation describing relevant quality factors
+(e.g. noise, clock jitter, etc.). A PCB implementation may have
+several variants for different PCB materials. When dealing with
+sufficiently high frequencies, OpenEMS simulations are provided to
+justify the various layout decisions (e.g. trace width, etc.).
