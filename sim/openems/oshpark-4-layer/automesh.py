@@ -112,6 +112,7 @@ class AutoMesh:
         # smooth mesh
         for dim in range(3):
             self.SmoothMeshLines(dim)
+
         # set calculated mesh lines
         self.AddAllMeshLines()
 
@@ -172,10 +173,9 @@ class AutoMesh:
                 self.RemoveTightMeshLines(dim)
             # we have to check whether these are zero-dimension
             # structures before deleting them.
-            elif (
-                pos - last_pos < self.smallest_res
-                and pos not in self.const_meshes[dim]
-                and last_pos not in self.const_meshes[dim]
+            elif pos - last_pos < self.smallest_res and (
+                pos not in self.const_meshes[dim]
+                or last_pos not in self.const_meshes[dim]
             ):
                 if last_pos not in self.const_meshes[dim]:
                     del self.mesh_lines[dim][i - 1]
