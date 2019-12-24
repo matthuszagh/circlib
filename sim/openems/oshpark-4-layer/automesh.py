@@ -109,10 +109,13 @@ class AutoMesh:
         for dim in range(3):
             self.EnforceThirds(dim)
 
-        # TODO smooth mesh
+        # smooth mesh
+        for dim in range(3):
+            self.SmoothMeshLines(dim)
         # set calculated mesh lines
         self.AddAllMeshLines()
 
+    # TODO should ensure that inserted mesh lines are not at metal boundaries
     def EnforceThirds(self, dim):
         for i, pos in enumerate(self.mesh_lines[dim]):
             if pos in self.metal_bounds[dim]:
@@ -166,6 +169,7 @@ class AutoMesh:
             # we can freely delete duplicates
             if pos == last_pos:
                 del self.mesh_lines[dim][i]
+                self.RemoveTightMeshLines(dim)
             # we have to check whether these are zero-dimension
             # structures before deleting them.
             elif (
@@ -287,18 +291,46 @@ class AutoMesh:
         self.ranges_meshed[dim].append([lower, upper])
         self.ConsolidateMeshedRanges(dim)
 
-    def SmoothMeshAtIndex(self, dim, idx):
-        # TODO
-        assert True
-        # left_spacing = None
-        # right_spacing = None
-        # if idx - 1 >= 0 and idx + 1 <= len(self.mesh_lines[dim]):
-        #     left_spacing = (
-        #         self.mesh_lines[dim][idx] - self.mesh_lines[dim][idx - 1]
-        #     )
-        #     right_spacing = (
-        #         self.mesh_lines[dim][idx + 1] - self.mesh_lines[dim][idx]
-        #     )
+    def SmoothMeshLines(self, dim):
+        for i, pos in enumerate(self.mesh_lines[dim]):
+            if i == 0 or i == len(self.mesh_lines[dim]) - 1:
+                continue
+            left_spacing = pos - self.mesh_lines[dim][i - 1]
+            right_spacing = self.mesh_lines[dim][i + 1] - pos
+            if (
+                left_spacing > (self.smooth * right_spacing)
+                and left_spacing - (self.smooth * right_spacing)
+                > right_spacing / 10
+            ):
+                if left_spacing / right_spacing <= 2:
+                    adj = (left_spacing - (self.smooth * right_spacing)) / (
+                        self.smooth + 1
+                    )
+                    # TODO need to ensure new mesh line doesn't fall
+                    # on metal boundary or violate thirds.
+                    del self.mesh_lines[dim][i]
+                    insort_left(self.mesh_lines[dim], pos - adj)
+                else:
+                    insort_left(self.mesh_lines[dim], pos - (left_spacing / 2))
+                self.SmoothMeshLines(dim)
+            elif (
+                right_spacing > self.smooth * left_spacing
+                and right_spacing - (self.smooth * left_spacing)
+                > left_spacing / 10
+            ):
+                if right_spacing / left_spacing <= 2:
+                    adj = (right_spacing - (self.smooth * left_spacing)) / (
+                        self.smooth + 1
+                    )
+                    # TODO need to ensure new mesh line doesn't fall
+                    # on metal boundary or violate thirds.
+                    del self.mesh_lines[dim][i]
+                    insort_left(self.mesh_lines[dim], pos + adj)
+                else:
+                    insort_left(
+                        self.mesh_lines[dim], pos + (right_spacing / 2)
+                    )
+                self.SmoothMeshLines(dim)
 
     def NearestDivisibleRes(self, lower, upper, res):
         """
@@ -316,7 +348,6 @@ class AutoMesh:
         if lower == upper:
             insort_left(self.mesh_lines[dim], lower)
             insort_left(self.const_meshes[dim], lower)
-            self.SmoothMeshAtIndex(dim, self.mesh_lines[dim].index(lower))
         else:
             [outer_bounds, inner_bounds] = self.SplitBounds(lower, upper, dim)
             for obound in outer_bounds:
