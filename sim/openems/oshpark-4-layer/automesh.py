@@ -256,8 +256,8 @@ class AutoMesh:
                     self.UpdateRanges(ibound[0], ibound[1], dim)
                     # TODO set new mesh. ensure smoothness and thirds
                 if metal:
-                    insort_left(self.metal_bounds[dim], obound[0])
-                    insort_left(self.metal_bounds[dim], obound[1])
+                    insort_left(self.metal_bounds[dim], ibound[0])
+                    insort_left(self.metal_bounds[dim], ibound[1])
 
         # # above range of existing mesh
         # if (
