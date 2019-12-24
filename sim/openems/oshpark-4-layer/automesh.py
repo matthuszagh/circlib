@@ -1,4 +1,5 @@
 from bisect import insort_left, bisect_left, bisect_right
+import numpy as np
 
 
 class AutoMesh:
@@ -38,16 +39,12 @@ class AutoMesh:
         self.min_lines = min_lines
         # Sort primitives by decreasing priority.
         self.prims = self.csx.GetAllPrimitives()
-        # self.prims = self.SortPrimitivesByPriority()
-
         # Keep track of mesh regions already applied. This is an array
         # of 3 elements. The 1st element is a list of ranges in the
         # x-dimension that have already been meshed. The 2nd
         # corresponds to the y-dimension and the 3rd corresponds to
         # the z-dimension.
         self.ranges_meshed = [[], [], []]
-        # self.ranges_meshed = [[None, None], [None, None], [None, None]]
-
         # Keep a list of all metal boundaries. No mesh line is allowed to
         # lie on a boundary, and to the extent possible, should obey the
         # thirds rule about that boundary. Zero-dimension metal structures
@@ -58,6 +55,10 @@ class AutoMesh:
         # Mesh lines that cannot be moved. These are mesh lines that
         # lie directly on a zero-dimension primitive.
         self.const_meshes = [[], [], []]
+        # Keep track of the smallest valid resolution value. This
+        # allows us to later remove all adjacent mesh lines separated
+        # by less than this value.
+        self.smallest_res = self.mres
         # The generated mesh.
         self.mesh = self.csx.GetGrid()
         self.mesh.SetDeltaUnit(unit)
@@ -100,13 +101,93 @@ class AutoMesh:
             self.GenMeshInBounds(
                 self.simbox[i][0], self.simbox[i][1], self.sres, i, metal=False
             )
+        # remove unintended, tightly spaced meshes
+        for dim in range(3):
+            self.RemoveTightMeshLines(dim)
+
+        # enforce thirds rule
+        for dim in range(3):
+            self.EnforceThirds(dim)
+
+        # TODO smooth mesh
         # set calculated mesh lines
         self.AddAllMeshLines()
+
+    def EnforceThirds(self, dim):
+        for i, pos in enumerate(self.mesh_lines[dim]):
+            if pos in self.metal_bounds[dim]:
+                # at lower boundary
+                if i == 0:
+                    del self.mesh_lines[dim][i]
+                    insort_left(self.mesh_lines[dim], pos + (self.mres / 3))
+                    self.EnforceThirds(dim)
+                # at upper boundary
+                elif i == len(self.mesh_lines[dim]) - 1:
+                    del self.mesh_lines[dim][i]
+                    insort_left(self.mesh_lines[dim], pos - (self.mres / 3))
+                    self.EnforceThirds(dim)
+                else:
+                    spacing_left = pos - self.mesh_lines[dim][i - 1]
+                    spacing_right = self.mesh_lines[dim][i + 1] - pos
+                    del self.mesh_lines[dim][i]
+                    # metal-metal boundary
+                    if spacing_left == spacing_right:
+                        insort_left(
+                            self.mesh_lines[dim], pos - (self.mres / 3)
+                        )
+                        insort_left(
+                            self.mesh_lines[dim], pos + (self.mres / 3)
+                        )
+                    elif spacing_left < spacing_right:
+                        insort_left(
+                            self.mesh_lines[dim], pos - (self.mres / 3)
+                        )
+                        insort_left(
+                            self.mesh_lines[dim], pos + (2 * self.mres / 3)
+                        )
+                    else:
+                        insort_left(
+                            self.mesh_lines[dim], pos - (2 * self.mres / 3)
+                        )
+                        insort_left(
+                            self.mesh_lines[dim], pos + (self.mres / 3)
+                        )
+                    self.EnforceThirds(dim)
+
+    def RemoveTightMeshLines(self, dim):
+        """
+        Remove adjacent mesh lines for dimension @dim with spacing less
+        than the smallest valid resolution.
+        """
+        last_pos = self.mesh_lines[dim][0]
+        for i, pos in enumerate(self.mesh_lines[dim]):
+            if i == 0:
+                continue
+            # we can freely delete duplicates
+            if pos == last_pos:
+                del self.mesh_lines[dim][i]
+            # we have to check whether these are zero-dimension
+            # structures before deleting them.
+            elif (
+                pos - last_pos < self.smallest_res
+                and pos not in self.const_meshes[dim]
+                and last_pos not in self.const_meshes[dim]
+            ):
+                if last_pos not in self.const_meshes[dim]:
+                    del self.mesh_lines[dim][i - 1]
+                else:
+                    del self.mesh_lines[dim][i]
+                self.RemoveTightMeshLines(dim)
+            else:
+                last_pos = pos
 
     def AddAllMeshLines(self):
         for dim in range(3):
             for line in self.mesh_lines[dim]:
                 self.mesh.AddLine(dim, line)
+
+    def GetMesh(self):
+        return self.mesh
 
     def SortPrimitivesByPriority(self):
         return sorted(self.prims, key=lambda prim: -prim.GetPriority())
@@ -222,30 +303,47 @@ class AutoMesh:
         #         self.mesh_lines[dim][idx + 1] - self.mesh_lines[dim][idx]
         #     )
 
+    def NearestDivisibleRes(self, lower, upper, res):
+        """
+        Return the nearest resolution to @res that evenly subdivides the
+        interval [@lower, @upper].
+
+        This is important because it helps prevent adjacent lines from
+        bunching up and unnecessarily increasing the simulation time.
+        """
+        num_divisions = np.round((upper - lower) / res)
+        num_divisions = max(num_divisions, 1)
+        return (upper - lower) / num_divisions
+
     def GenMeshInBounds(self, lower, upper, res, dim, metal=False):
         if lower == upper:
             insort_left(self.mesh_lines[dim], lower)
-            insort_left(self.const_meshes, lower)
+            insort_left(self.const_meshes[dim], lower)
             self.SmoothMeshAtIndex(dim, self.mesh_lines[dim].index(lower))
         else:
             [outer_bounds, inner_bounds] = self.SplitBounds(lower, upper, dim)
             for obound in outer_bounds:
-                if upper - lower < (self.min_lines - 1 + (2 / 3)) * res:
-                    res = (upper - lower) / (self.min_lines - 1 + (2 / 3))
+                if upper - lower < self.min_lines * res:
+                    res = (upper - lower) / self.min_lines
+                else:
+                    res = self.NearestDivisibleRes(obound[0], obound[1], res)
+                self.smallest_res = min(self.smallest_res, res)
                 j = obound[0]
                 while j <= obound[1]:
                     insort_left(self.mesh_lines[dim], j)
                     j += res
                 self.UpdateRanges(obound[0], obound[1], dim)
-                # TODO ensure smoothness and thirds
                 if metal:
                     insort_left(self.metal_bounds[dim], obound[0])
                     insort_left(self.metal_bounds[dim], obound[1])
             for ibound in inner_bounds:
+                if upper - lower < self.min_lines * res:
+                    res = (upper - lower) / self.min_lines
+                else:
+                    res = self.NearestDivisibleRes(ibound[0], ibound[1], res)
+                self.smallest_res = min(self.smallest_res, res)
                 # only redo the mesh if the desired one is finer than
                 # the existing one
-                if upper - lower < (self.min_lines - 1 + (2 / 3)) * res:
-                    res = (upper - lower) / (self.min_lines - 1 + (2 / 3))
                 cur_mesh_res = self.MeshResInBounds(ibound[0], ibound[1], dim)
                 if cur_mesh_res > res and abs(cur_mesh_res - res) > res / 10:
                     self.ClearMeshInBounds(ibound[0], ibound[1], dim)
@@ -254,7 +352,6 @@ class AutoMesh:
                         insort_left(self.mesh_lines[dim], j)
                         j += res
                     self.UpdateRanges(ibound[0], ibound[1], dim)
-                    # TODO set new mesh. ensure smoothness and thirds
                 if metal:
                     insort_left(self.metal_bounds[dim], ibound[0])
                     insort_left(self.metal_bounds[dim], ibound[1])
