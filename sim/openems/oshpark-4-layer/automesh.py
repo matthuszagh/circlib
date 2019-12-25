@@ -122,18 +122,21 @@ class AutoMesh:
             if pos in self.metal_bounds[dim]:
                 # at lower boundary
                 if i == 0:
-                    del self.mesh_lines[dim][i]
+                    if pos not in self.const_meshes[dim]:
+                        del self.mesh_lines[dim][i]
                     insort_left(self.mesh_lines[dim], pos + (self.mres / 3))
                     self.EnforceThirds(dim)
                 # at upper boundary
                 elif i == len(self.mesh_lines[dim]) - 1:
-                    del self.mesh_lines[dim][i]
+                    if pos not in self.const_meshes[dim]:
+                        del self.mesh_lines[dim][i]
                     insort_left(self.mesh_lines[dim], pos - (self.mres / 3))
                     self.EnforceThirds(dim)
                 else:
                     spacing_left = pos - self.mesh_lines[dim][i - 1]
                     spacing_right = self.mesh_lines[dim][i + 1] - pos
-                    del self.mesh_lines[dim][i]
+                    if pos not in self.const_meshes[dim]:
+                        del self.mesh_lines[dim][i]
                     # metal-metal boundary
                     if spacing_left == spacing_right:
                         insort_left(
@@ -250,7 +253,7 @@ class AutoMesh:
                     outin_ranges[1].append([lower_mesh, upper])
                     return outin_ranges
             else:
-                outin_ranges[1].append([lower, upper_mesh])
+                outin_ranges[1].append([lower, min(upper, upper_mesh)])
                 if upper > upper_mesh:
                     lower = upper_mesh
                     continue
@@ -264,7 +267,7 @@ class AutoMesh:
     def ClearMeshInBounds(self, lower, upper, dim):
         for elt in self.mesh_lines[dim]:
             if elt >= lower and elt <= upper:
-                self.mesh_lines.remove(elt)
+                self.mesh_lines[dim].remove(elt)
 
     def RangeUnion(self, ranges, start_idx=0):
         ranges = sorted(ranges)
@@ -308,8 +311,13 @@ class AutoMesh:
                     )
                     # TODO need to ensure new mesh line doesn't fall
                     # on metal boundary or violate thirds.
-                    del self.mesh_lines[dim][i]
-                    insort_left(self.mesh_lines[dim], pos - adj)
+                    if pos not in self.const_meshes[dim]:
+                        del self.mesh_lines[dim][i]
+                        insort_left(self.mesh_lines[dim], pos - adj)
+                    else:
+                        insort_left(
+                            self.mesh_lines[dim], pos - (left_spacing / 2)
+                        )
                 else:
                     insort_left(self.mesh_lines[dim], pos - (left_spacing / 2))
                 self.SmoothMeshLines(dim)
@@ -324,8 +332,13 @@ class AutoMesh:
                     )
                     # TODO need to ensure new mesh line doesn't fall
                     # on metal boundary or violate thirds.
-                    del self.mesh_lines[dim][i]
-                    insort_left(self.mesh_lines[dim], pos + adj)
+                    if pos not in self.const_meshes[dim]:
+                        del self.mesh_lines[dim][i]
+                        insort_left(self.mesh_lines[dim], pos + adj)
+                    else:
+                        insort_left(
+                            self.mesh_lines[dim], pos + (right_spacing / 2)
+                        )
                 else:
                     insort_left(
                         self.mesh_lines[dim], pos + (right_spacing / 2)
