@@ -119,24 +119,24 @@ class AutoMesh:
     # TODO should ensure that inserted mesh lines are not at metal boundaries
     def EnforceThirds(self, dim):
         for i, pos in enumerate(self.mesh_lines[dim]):
-            if pos in self.metal_bounds[dim]:
+            if (
+                pos in self.metal_bounds[dim]
+                and pos not in self.const_meshes[dim]
+            ):
                 # at lower boundary
                 if i == 0:
-                    if pos not in self.const_meshes[dim]:
-                        del self.mesh_lines[dim][i]
+                    del self.mesh_lines[dim][i]
                     insort_left(self.mesh_lines[dim], pos + (self.mres / 3))
                     self.EnforceThirds(dim)
                 # at upper boundary
                 elif i == len(self.mesh_lines[dim]) - 1:
-                    if pos not in self.const_meshes[dim]:
-                        del self.mesh_lines[dim][i]
+                    del self.mesh_lines[dim][i]
                     insort_left(self.mesh_lines[dim], pos - (self.mres / 3))
                     self.EnforceThirds(dim)
                 else:
                     spacing_left = pos - self.mesh_lines[dim][i - 1]
                     spacing_right = self.mesh_lines[dim][i + 1] - pos
-                    if pos not in self.const_meshes[dim]:
-                        del self.mesh_lines[dim][i]
+                    del self.mesh_lines[dim][i]
                     # metal-metal boundary
                     if spacing_left == spacing_right:
                         insort_left(
