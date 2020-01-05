@@ -1,3 +1,6 @@
 **/*.vtr
 **/__pycache__
 sim/openems/oshpark-4-layer/microstrip/sim
+**/__init__.erc
+**/__init__.log
+**/csx.xml
