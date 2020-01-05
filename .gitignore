@@ -1,0 +1,3 @@
+**/*.vtr
+**/__pycache__
+sim/openems/oshpark-4-layer/microstrip/sim
