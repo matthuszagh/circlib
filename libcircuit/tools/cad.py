@@ -12,12 +12,10 @@ def eseries_val(val, series=24):
     if series not in [3, 6, 12, 24, 48, 96, 192]:
         raise ValueError("Invalid series value specified: {}" % series)
 
-    if val <= 0 or val >= 10:
-        raise ValueError(
-            "Must provide a value between (non-inclusive) 0 and 10"
-        )
+    if val <= 0:
+        raise ValueError("eseries_val() can only accept a positive value.")
 
-    if val <= 24:
+    if series <= 24:
         stdvals = [round(10 ** (n / series), 1) for n in range(series)]
         # account for official value deviations from calculated value.
         stdvals = [2.7 if x == 2.6 else x for x in stdvals]
@@ -31,20 +29,46 @@ def eseries_val(val, series=24):
     else:
         stdvals = [round(10 ** (n / series), 2) for n in range(series)]
 
-    mod10 = val % 10
-    multiplier = val / mod10
+    (val, multiplier) = normalize_value(val, 1)
 
-    ins_pos = bisect_left(stdvals, mod10)
+    ins_pos = bisect_left(stdvals, val)
     if ins_pos == 0:
         return multiplier * stdvals[0]
     if ins_pos == len(stdvals):
         return multiplier * stdvals[-1]
     lower = stdvals[ins_pos - 1]
     higher = stdvals[ins_pos]
-    if higher - mod10 < mod10 - lower:
+    if higher - val < val - lower:
         return multiplier * higher
     else:
         return multiplier * lower
+
+
+def normalize_value(val: float, multiplier: float) -> (float, float):
+    """
+    Find two numbers, a and b, such that a*b=val, a is in the range
+    [1,10), and b%10==0.
+
+    Args:
+        val: the value to normalize to the range [1,10).
+             Must be > 0.
+
+    Returns:
+        (a, b) in the description, or the normalized value and its
+        multiplier.
+    """
+    if val >= 1 and val < 10:
+        return (val, multiplier)
+
+    if val >= 10:
+        val /= 10
+        multiplier *= 10
+        return normalize_value(val, multiplier)
+
+    if val < 1:
+        val *= 10
+        multiplier /= 10
+        return normalize_value(val, multiplier)
 
 
 # TODO this should be improved to support a better tradeoff between
