@@ -1,5 +1,4 @@
-from skidl import subcircuit, Pin, Part
-from skidl.pyspice import *
+from skidl import subcircuit, Part
 import numpy as np
 from libcircuit.tools.skidl import Subcircuit
 
