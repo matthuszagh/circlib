@@ -7,11 +7,12 @@ from libcircuit.cad import (
     resistor_footprint,
     capacitor_footprint,
 )
+from libcircuit.base import BaseCircuit
 from libcircuit.spice import capacitor_equiv, resistor_equiv
 import matplotlib.pyplot as plt
 
 
-class CapacitanceMultiplier:
+class CapacitanceMultiplier(BaseCircuit):
     """
     Capacitance multiplier circuit.
     """
