@@ -1,6 +1,6 @@
 from skidl import subcircuit, Part
 import numpy as np
-from libcircuit.tools.skidl import Subcircuit
+from libcircuit.skidl import Subcircuit
 
 
 def df_to_esr(c, df, df_freq):

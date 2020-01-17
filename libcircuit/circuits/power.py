@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 
 from skidl import Part, subcircuit
-from skidl.pyspice import gnd, node, generate_netlist
-from libcircuit.tools.cad import (
+from skidl.pyspice import gnd, node, generate_netlist, lib_search_paths, SPICE
+from libcircuit.cad import (
     eseries_val,
     resistor_footprint,
     capacitor_footprint,
 )
-from libcircuit.tools.spice import capacitor_equiv, resistor_equiv
+from libcircuit.spice import capacitor_equiv, resistor_equiv
 import matplotlib.pyplot as plt
 
 
@@ -24,13 +24,11 @@ class CapacitanceMultiplier:
         a voltage converter, use the converter's switching frequency. @vin
         and @vout are the input and output nets, respectively.
         """
-        self.rval = eseries_val(10e3 / iloadmax)
+        self.rval = eseries_val(100 / iloadmax)
         self.cval = eseries_val(10 / (self.rval * ripplefreq))
         self.vin = vin
         self.vout = vout
         self.gnd = gnd
-        print(self.rval)
-        print(self.cval)
 
     @subcircuit
     def cad(self):
@@ -72,14 +70,20 @@ class CapacitanceMultiplier:
             self.rbase = Part("pyspice", "R", value=100)
 
         self.d = Part("pyspice", "D", model="1N4001")
-        self.npn = Part("pyspice", "Q", model="2N2222A")
+        lib_search_paths[SPICE].append("/home/matt/src/spicelib")
+        self.nmos = Part("FQD13N06", "FQD13N06")
+        # self.npn = Part("pyspice", "Q", model="2N2222A")
         self._connect_components()
 
     def _connect_components(self):
-        self.vin += self.r[1], self.npn["C"]
-        self.r[2] += self.c[1], self.rbase[2], self.d[2]
-        self.rbase[1] += self.npn["B"]
-        self.npn["E"] += self.vout, self.d[1]
+        # self.vin += self.r[1], self.npn["C"]
+        self.vin += self.r[1], self.nmos[2]
+        # self.r[2] += self.c[1], self.rbase[2], self.d[2]
+        self.r[2] += self.c[1], self.nmos[1], self.d[2]
+        # self.rbase[1] += self.npn["B"]
+        # self.rbase[1] += self.nmos[2]
+        # self.npn["E"] += self.vout, self.d[1]
+        self.nmos[3] += self.vout, self.d[1]
         self.c[2] += self.gnd
 
 
@@ -92,6 +96,8 @@ if __name__ == "__main__":
     cap_mul = CapacitanceMultiplier(
         iloadmax=1, ripplefreq=500e3, vin=vin[1], vout=rload[1], gnd=gnd
     )
+    print(cap_mul.rval)
+    print(cap_mul.cval)
     cap_mul.spice()
     circ = generate_netlist(libs="/home/matt/src/spicelib")
     sim = circ.simulator()

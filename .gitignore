@@ -4,3 +4,7 @@ sim/openems/oshpark-4-layer/microstrip/sim
 **/__init__.erc
 **/__init__.log
 **/csx.xml
+**/*.erc
+**/*.log
+**/*.net
+/libcircuit/circuits/power_lib_sklib.py
