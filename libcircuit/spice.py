@@ -65,9 +65,15 @@ def resistor_equiv(
 ) -> Subcircuit:
     """
     Non-ideal resistor equivalent circuit for use in a SPICE
-    simulation. @r is the resistor's resistance value (in
-    ohms). @c is the parallel capacitance in ohms. @l is the series
-    inductance in henrys.
+    simulation.
+
+    Args:
+        value: resistance (ohms)
+        c: parallel capacitance (farads)
+        l: series inductance (henrys)
+
+    Returns:
+        Subcircuit consisting of attachment pins.
     """
     # ============================= parts ============================
     rseries = Part("pyspice", "R", value=value)
@@ -75,7 +81,6 @@ def resistor_equiv(
     lseries = Part("pyspice", "L", value=l)
 
     # ========================== connections =========================
-    rseries[1] += cparallel[1]
+    rseries[1] += cparallel[1], lseries[2]
     rseries[2] += cparallel[2]
-    rseries[1] += lseries[2]
     return Subcircuit(pins=[lseries[1], rseries[2]])
