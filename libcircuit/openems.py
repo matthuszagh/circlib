@@ -1,4 +1,10 @@
 from bisect import insort_left, bisect_left
+import concurrent.futures as futures
+import tempfile
+from CSXCAD import CSXCAD as csxcad
+import openEMS as openems
+from openEMS.physical_constants import C0
+from openEMS.ports import Port
 import numpy as np
 
 
@@ -467,3 +473,209 @@ class AutoMesh:
                 if metal:
                     insort_left(self.metal_bounds[dim], ibound[0])
                     insort_left(self.metal_bounds[dim], ibound[1])
+
+
+def microstrip_width_sweep(
+    f0: float,
+    fc: float,
+    thick: float,
+    epsr: float,
+    resistivity: float,
+    z0_ref: float,
+    width_bounds: [float, float],
+    num_points: int,
+    fout: str,
+) -> None:
+    """
+    Calculate microstrip characteristic impedance as a function of trace width.
+
+    Args:
+        f0: center frequency (Hz)
+        fc: 20dB cutoff frequency, as the deviation from the center frequency
+        thick: substrate thickness (mm)
+        epsr: substrate dielectric constant
+        z0_ref: desired impedance
+        resistivity: substrate resistivity
+        width_bounds: [lower_width, upper_width] sweep over this width range
+        num_points: number of width values to calculate. This value has a
+                    significant effect on simulation time since each point
+                    is calculated in its own thread. Therefore, to minimize
+                    computation time, its recommended to choose some multiple
+                    of the number of cores available on the simulation machine.
+                    The total simulation time will be roughly equal to the time
+                    it takes to compute 1 point times the ratio of the number
+                    of points to number of machine cores.
+        fout: filename where results should be written. relative to current
+              dir.
+    """
+    widths = np.linspace(width_bounds[0], width_bounds[1], num_points)
+    subprocs = [None] * len(widths)
+    executer = futures.ProcessPoolExecutor()
+    for i, width in enumerate(widths):
+        subprocs[i] = executer.submit(
+            microstrip_impedance,
+            f0,
+            fc,
+            thick,
+            epsr,
+            resistivity,
+            width,
+            z0_ref,
+        )
+
+    with open(fout, "w") as f:
+        f.write(
+            "{:10} {:10} {:10} {:10}\n".format("width", "zlow", "z0", "zhigh")
+        )
+        for i, _ in enumerate(subprocs):
+            [zlow, z0, zhigh] = subprocs[i].result()
+            f.write(
+                "{:10f} {:10f} {:10f} {:10f}\n".format(
+                    widths[i], zlow, z0, zhigh
+                )
+            )
+
+
+def microstrip_impedance(
+    f0: float,
+    fc: float,
+    thick: float,
+    epsr: float,
+    resistivity: float,
+    width: float,
+    z0_ref: float,
+) -> [float, float, float]:
+    """
+    Calculate the characeristic impedance for a microstrip line for a
+    frequency range and given width.
+
+    Returns:
+        [z0_flow, z0_fcenter, z0_fhigh] where flow=f0-fc, fcenter=f0,
+        and fhigh=f0+fc.
+    """
+    # dimensions and parameters
+    unit = 1e-3
+    microstrip_len = 100
+    substrate_width = 20
+    substrate_len = 1.2 * microstrip_len
+    lmin = C0 / ((f0 + fc) * unit)
+    substrate_kappa = 1 / resistivity
+
+    # structures
+    csx = csxcad.ContinuousStructure()
+    microstrip = csx.AddMetal("PEC")
+    microstrip.AddBox(
+        priority=10,
+        start=[-microstrip_len / 2, -width / 2, 0],
+        stop=[microstrip_len / 2, width / 2, 0],
+    )
+    substrate = csx.AddMaterial(
+        "substrate", epsilon=epsr, kappa=substrate_kappa
+    )
+    substrate.AddBox(
+        priority=0,
+        start=[-substrate_len / 2, -substrate_width / 2, -thick],
+        stop=[substrate_len / 2, substrate_width / 2, 0],
+    )
+
+    # simulation
+    fdtd = openems.openEMS(EndCriteria=1e-5)
+    fdtd.SetCSX(csx)
+    fdtd.SetGaussExcite(f0, fc)
+    fdtd.SetBoundaryCond(["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"])
+    fdtd.AddLumpedPort(
+        port_nr=0,
+        R=z0_ref,
+        start=[-microstrip_len / 2 + (microstrip_len / 200), 0, -thick],
+        stop=[-microstrip_len / 2 + (microstrip_len / 200), 0, 0],
+        p_dir="z",
+        excite=1,
+        priority=999,
+    )
+    vprobe = [None, None, None]
+    iprobe = [None, None, None]
+
+    for i, probe in enumerate(vprobe):
+        vprobe[i] = csx.AddProbe("vprobe_" + str(width) + "_" + str(i), 0)
+        vprobe[i].AddBox(
+            start=[
+                -microstrip_len / 2 + ((i + 1) * microstrip_len / 4),
+                0,
+                -thick,
+            ],
+            stop=[-microstrip_len / 2 + ((i + 1) * microstrip_len / 4), 0, 0,],
+        )
+
+    for i, probe in enumerate(iprobe):
+        iprobe[i] = csx.AddProbe(
+            "iprobe_" + str(width) + "_" + str(i), 1, norm_dir=0
+        )
+        iprobe[i].AddBox(
+            start=[
+                -microstrip_len / 2
+                - (microstrip_len / 20)
+                + ((i + 1) * microstrip_len / 4),
+                -width / 2,
+                0,
+            ],
+            stop=[
+                -microstrip_len / 2
+                - (microstrip_len / 20)
+                + ((i + 1) * microstrip_len / 4),
+                width / 2,
+                0,
+            ],
+        )
+
+    auto_mesh = AutoMesh(
+        csx,
+        lmin,
+        mres=1 / 20,
+        sres=1 / 10,
+        smooth=1.4,
+        unit=unit,
+        min_lines=5,
+        expand_bounds=[10, 0, 10, 10, 0, 10],
+    )
+    auto_mesh.AutoGenMesh()
+
+    tmpdir = tempfile.TemporaryDirectory()
+    fdtd.Run(tmpdir.name, cleanup=True)
+
+    num_freq = 2000
+    freq = np.linspace(f0 - fc, f0 + fc, num_freq)
+    z0_ports = [None, None, None]
+    for n, _ in enumerate(z0_ports):
+        z0_ports[n] = Port(
+            None,
+            None,
+            None,
+            None,
+            None,
+            U_filenames=["vprobe_" + str(width) + "_" + str(n)],
+            I_filenames=["iprobe_" + str(width) + "_" + str(n)],
+        )
+        z0_ports[n].CalcPort(tmpdir.name, freq, ref_impedance=z0_ref)
+
+    zlow = np.average(
+        [
+            np.absolute(z0_ports[i].uf_tot[0])
+            / np.absolute(z0_ports[i].if_tot[0])
+            for i in range(3)
+        ]
+    )
+    z0 = np.average(
+        [
+            np.absolute(z0_ports[i].uf_tot[int(num_freq / 2 - 1)])
+            / np.absolute(z0_ports[i].if_tot[int(num_freq / 2 - 1)])
+            for i in range(3)
+        ]
+    )
+    zhigh = np.average(
+        [
+            np.absolute(z0_ports[i].uf_tot[-1])
+            / np.absolute(z0_ports[i].if_tot[-1])
+            for i in range(3)
+        ]
+    )
+    return [zlow, z0, zhigh]
