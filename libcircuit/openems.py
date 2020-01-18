@@ -1,6 +1,8 @@
-from bisect import insort_left, bisect_left
+from bisect import insort_left, bisect_left, bisect_right
 import concurrent.futures as futures
 import tempfile
+from collections import OrderedDict
+from typing import List, Dict
 from CSXCAD import CSXCAD as csxcad
 import openEMS as openems
 from openEMS.physical_constants import C0
@@ -473,6 +475,75 @@ class AutoMesh:
                 if metal:
                     insort_left(self.metal_bounds[dim], ibound[0])
                     insort_left(self.metal_bounds[dim], ibound[1])
+
+
+class PCB:
+    """
+    A PCB structure and material properties for use in an openems simulation.
+    """
+
+    def __init__(
+        self,
+        layers: int,
+        sub_epsr: Dict[float, float],
+        sub_rho: float,
+        layer_sep: List[float],
+        layer_thickness: List[float],
+    ):
+        """
+        Args:
+            layers: number of conductive layers
+            sub_epsr: substrate dielectric constant. dictionary of frequency
+                      (Hz) and associated dielectric.
+            sub_rho: volume resistivity (ohm*mm)
+            layer_sep: separations (in mm) between adjacent copper layers. A
+                       list where the first value is the separation between
+                       the top layer and second layer, etc. This is
+                       equivalently the substrate thickness.
+            layer_thickness: thickness of each conductive layer (in mm). Again
+                             proceeds from top to bottom layer.
+        """
+        self.layers = layers
+        self.sub_epsr = OrderedDict(sub_epsr)
+        self.sub_rho = sub_rho
+        self.sub_kappa = 1 / sub_rho
+        self.layer_sep = layer_sep
+        self.layer_thickness = layer_thickness
+
+    def epsr_at_freq(self, freq: float):
+        """
+        Approximate the dielectric at a given frequency given the provided
+        epsr values.
+
+        Args:
+            freq: frequency of interest (Hz)
+
+        Returns:
+            dielectric constant
+        """
+        if freq <= self.sub_epsr[0]:
+            return self.sub_epsr[0]
+        elif freq >= self.sub_epsr[-1]:
+            return self.sub_epsr[-1]
+
+        # perform linear interpolation
+        xlow = bisect_left(self.sub_epsr.keys(), freq)
+        xhigh = bisect_right(self.sub_epsr.keys(), freq)
+        ylow = self.sub_epsr[xlow]
+        yhigh = self.sub_epsr[xhigh]
+        slope = (yhigh - ylow) / (xhigh - xlow)
+        return ylow + (slope * (freq - xlow))
+
+
+common_pcbs = {
+    "oshpark4": PCB(
+        layers=4,
+        sub_epsr={100e6: 3.72, 1e9: 3.69, 2e9: 3.68, 5e9: 3.64, 10e9: 3.65},
+        sub_rho=4.4e14,
+        layer_sep=[0.1702, 1.1938, 0.1702],
+        layer_thickness=[0.0356, 0.0178, 0.0178, 0.0356],
+    )
+}
 
 
 def microstrip_width_sweep(
