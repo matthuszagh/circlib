@@ -573,7 +573,7 @@ def wheeler_z0(w: float, t: float, er: float, h: float) -> float:
             / (
                 np.sqrt(
                     ((t / h) ** 2)
-                    + ((1 / np.pi) * ((1 / ((w / t) + (11 / 10))) ** 2))
+                    + (((1 / np.pi) * ((1 / ((w / t) + (11 / 10))))) ** 2)
                 )
             )
         )
@@ -607,7 +607,7 @@ def wheeler_z0_width(
     h: float,
     tol: float = 0.01,
     guess: float = 0.3,
-):
+) -> float:
     """
     Calculate the microstrip width for a given characteristic
     impedance using Wheeler's formula.
