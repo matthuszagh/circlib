@@ -1,8 +1,10 @@
 from bisect import insort_left, bisect_left, bisect_right
 import concurrent.futures as futures
+from subprocess import run
 import tempfile
-from collections import OrderedDict
-from typing import List, Dict
+import os
+from shutil import rmtree
+from typing import List, Tuple
 from CSXCAD import CSXCAD as csxcad
 import openEMS as openems
 from openEMS.physical_constants import C0
@@ -485,7 +487,7 @@ class PCB:
     def __init__(
         self,
         layers: int,
-        sub_epsr: Dict[float, float],
+        sub_epsr: List[Tuple[float, float]],
         sub_rho: float,
         layer_sep: List[float],
         layer_thickness: List[float],
@@ -504,7 +506,7 @@ class PCB:
                              proceeds from top to bottom layer.
         """
         self.layers = layers
-        self.sub_epsr = OrderedDict(sub_epsr)
+        self.sub_epsr = sorted(sub_epsr, key=lambda epsr: epsr[0])
         self.sub_rho = sub_rho
         self.sub_kappa = 1 / sub_rho
         self.layer_sep = layer_sep
@@ -521,16 +523,22 @@ class PCB:
         Returns:
             dielectric constant
         """
-        if freq <= self.sub_epsr[0]:
-            return self.sub_epsr[0]
-        elif freq >= self.sub_epsr[-1]:
-            return self.sub_epsr[-1]
+        if freq <= self.sub_epsr[0][0]:
+            return self.sub_epsr[0][1]
+        elif freq >= self.sub_epsr[-1][0]:
+            return self.sub_epsr[-1][1]
 
         # perform linear interpolation
-        xlow = bisect_left(self.sub_epsr.keys(), freq)
-        xhigh = bisect_right(self.sub_epsr.keys(), freq)
-        ylow = self.sub_epsr[xlow]
-        yhigh = self.sub_epsr[xhigh]
+        tup_low = bisect_left([x[0] for x in self.sub_epsr], freq)
+        if self.sub_epsr[tup_low][0] == freq:
+            return self.sub_epsr[tup_low][1]
+
+        tup_high = tup_low
+        tup_low -= 1
+        xlow = self.sub_epsr[tup_low][0]
+        xhigh = self.sub_epsr[tup_high][0]
+        ylow = self.sub_epsr[tup_low][1]
+        yhigh = self.sub_epsr[tup_high][1]
         slope = (yhigh - ylow) / (xhigh - xlow)
         return ylow + (slope * (freq - xlow))
 
@@ -538,7 +546,13 @@ class PCB:
 common_pcbs = {
     "oshpark4": PCB(
         layers=4,
-        sub_epsr={100e6: 3.72, 1e9: 3.69, 2e9: 3.68, 5e9: 3.64, 10e9: 3.65},
+        sub_epsr=[
+            (100e6, 3.72),
+            (1e9, 3.69),
+            (2e9, 3.68),
+            (5e9, 3.64),
+            (10e9, 3.65),
+        ],
         sub_rho=4.4e14,
         layer_sep=[0.1702, 1.1938, 0.1702],
         layer_thickness=[0.0356, 0.0178, 0.0178, 0.0356],
@@ -626,7 +640,6 @@ def wheeler_z0_width(
     """
     width = guess
     zm = wheeler_z0(w=width, t=t, er=er, h=h)
-    print(zm)
     wlow = width / 10
     zlow = wheeler_z0(w=wlow, t=t, er=er, h=h)
     # inverse relation between width and z0
@@ -655,6 +668,325 @@ def wheeler_z0_width(
         zm = wheeler_z0(w=width, t=t, er=er, h=h)
 
     return width
+
+
+class Microstrip:
+    """
+    Microstrip transmission line.
+    """
+
+    def __init__(
+        self,
+        pcb: PCB,
+        f0: float,
+        fc: float,
+        z0_ref: float = 50,
+        microstrip_width: float = None,
+        microstrip_len: float = 100,
+        substrate_width: float = 20,
+        substrate_len: float = 120,
+        fcsx: str = None,
+        fvtr_dir: str = None,
+        efield: bool = False,
+    ):
+        """
+        Args:
+            pcb: PCB object
+            f0: center frequency (Hz)
+            fc: corner frequency, given as difference from f0 (Hz)
+            z0_ref: desired impedance (ohm)
+            microstrip_width: microstrip trace width (mm). If ommitted, an
+                              analytical best guess for z0_ref and f0 will be
+                              used (see `wheeler_z0_width`).
+            microstrip_len: microstrip trace length (mm). This value isn't
+                            critical but does need to be large enough for the
+                            openems simulation to work. If unsure, stick with
+                            the default.
+            substrate_width: substrate width (mm)
+            substrate_len: substrate length (mm). Must be at least as large as
+                           the microstrip length. If unsure, use the default.
+            fcsx: CSX file name to write CSXCAD structure to. If ommitted, do
+                  not save the file. Omitting this does not prevent you from
+                  viewing the CSX structure, just from saving it for later.
+                  Relative to current directory.
+            fvtr_dir: directory for VTR E-field dump files. Files will be
+                      prefixed with 'Et_'. If ommitted, E-field can still be
+                      viewed unless `efield` is set to false in which case this
+                      parameter has no effect.
+            efield: dump E-field time values for viewing.
+        """
+        self.pcb = pcb
+        self.f0 = f0
+        self.fc = fc
+        self.z0_ref = z0_ref
+        if microstrip_width is None:
+            self.microstrip_width = wheeler_z0_width(
+                z0=z0_ref,
+                t=self.pcb.layer_thickness[0],
+                er=self.pcb.epsr_at_freq(f0),
+                h=self.pcb.layer_sep[0],
+            )
+        else:
+            self.microstrip_width = microstrip_width
+        self.microstrip_len = microstrip_len
+        self.substrate_width = substrate_width
+        self.substrate_len = substrate_len
+        if fcsx is None:
+            fcsx = tempfile.TemporaryFile().name
+        else:
+            self.fcsx = os.path.abspath(fcsx)
+
+        self.efield = efield
+        if fvtr_dir is None:
+            if efield is not None:
+                fvtr_dir = tempfile.TemporaryDirectory().name
+        else:
+            self.fvtr_dir = os.path.abspath(fvtr_dir)
+            if os.path.exists(self.fvtr_dir):
+                rmtree(self.fvtr_dir)
+            os.mkdir(self.fvtr_dir)
+
+        # track whether simulation already performed so that we only
+        # need to simulate once
+        self.sim_done = False
+        self.freq_bins = None
+        self.calc_ports = None
+
+    def sim(
+        self,
+        num_probes: int = 3,
+        num_freq_bins: int = 500,
+        zero_trace_height: bool = False,
+    ) -> None:
+        """
+        Run an openems simulation for the current microstrip structure and
+        write the results to a file.
+
+        Args:
+            fout: output file name to write simulation results to. If ommitted,
+                  save the results to a temporary file.
+            num_probes: number of impedance probes placed along trace. This
+                        also determines outer dimension of return value.
+            num_freq_bins: number of frequency bins. More frequency bins means
+                       longer simulation time but possibly greater accuracy.
+            zero_trace_height: approximate trace height as 0. This can greatly
+                               reduce simulation time but may reduce accuracy.
+
+        Returns:
+            2D list of impedance values for each probe and frequency bin.
+        """
+        # dimensions and parameters
+        unit = 1e-3
+        lmin = C0 / ((self.f0 + self.fc) * unit)
+        if zero_trace_height:
+            trace_height = 0
+        else:
+            trace_height = self.pcb.layer_thickness[0]
+
+        # structures
+        csx = csxcad.ContinuousStructure()
+        microstrip = csx.AddMetal("PEC")
+        microstrip.AddBox(
+            priority=10,
+            start=[-self.microstrip_len / 2, -self.microstrip_width / 2, 0],
+            stop=[
+                self.microstrip_len / 2,
+                self.microstrip_width / 2,
+                trace_height,
+            ],
+        )
+        substrate = csx.AddMaterial(
+            "substrate",
+            epsilon=self.pcb.epsr_at_freq(self.f0),
+            kappa=self.pcb.sub_kappa,
+        )
+        substrate.AddBox(
+            priority=0,
+            start=[
+                -self.substrate_len / 2,
+                -self.substrate_width / 2,
+                -self.pcb.layer_sep[0],
+            ],
+            stop=[self.microstrip_len / 2, self.substrate_width / 2, 0],
+        )
+
+        # simulation
+        fdtd = openems.openEMS(EndCriteria=1e-5)
+        fdtd.SetCSX(csx)
+        fdtd.SetGaussExcite(self.f0, self.fc)
+        fdtd.SetBoundaryCond(["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"])
+        fdtd.AddLumpedPort(
+            port_nr=0,
+            R=self.z0_ref,
+            start=[
+                -self.microstrip_len / 2 + (self.microstrip_len / 200),
+                0,
+                -self.pcb.layer_sep[0],
+            ],
+            stop=[
+                -self.microstrip_len / 2 + (self.microstrip_len / 200),
+                0,
+                0,
+            ],
+            p_dir="z",
+            excite=1,
+            priority=999,
+        )
+        vprobe = [None] * num_probes
+        # vprobe_files = [None] * num_probes
+        iprobe = [None] * num_probes
+        # iprobe_files = [None] * num_probes
+
+        # TODO num_probes here and iprobe doesn't quite work because
+        # probes could be placed in PML
+        for i, _ in enumerate(vprobe):
+            # vprobe_files[i] = tempfile.TemporaryFile().name
+            vprobe[i] = csx.AddProbe("ut_" + str(i), 0)
+            vprobe[i].AddBox(
+                start=[
+                    -self.microstrip_len / 2
+                    + ((i + 1) * self.microstrip_len / (num_probes + 1)),
+                    0,
+                    -self.pcb.layer_sep[0],
+                ],
+                stop=[
+                    -self.microstrip_len / 2
+                    + ((i + 1) * self.microstrip_len / (num_probes + 1)),
+                    0,
+                    0,
+                ],
+            )
+
+        for i, _ in enumerate(iprobe):
+            # iprobe_files[i] = tempfile.TemporaryFile().name
+            iprobe[i] = csx.AddProbe("it_" + str(i), 1, norm_dir=0)
+            iprobe[i].AddBox(
+                start=[
+                    -self.microstrip_len / 2
+                    # - (self.microstrip_len / 20)
+                    + ((i + 1) * self.microstrip_len / (num_probes + 1)),
+                    -self.microstrip_width / 2,
+                    0,
+                ],
+                stop=[
+                    -self.microstrip_len / 2
+                    # - (self.microstrip_len / 20)
+                    + ((i + 1) * self.microstrip_len / (num_probes + 1)),
+                    self.microstrip_width / 2,
+                    0,
+                ],
+            )
+
+        auto_mesh = AutoMesh(
+            csx,
+            lmin,
+            mres=1 / 20,
+            sres=1 / 10,
+            smooth=1.4,
+            unit=unit,
+            min_lines=5,
+            expand_bounds=[10, 0, 10, 10, 0, 10],
+        )
+        auto_mesh.AutoGenMesh()
+
+        # E-field recording
+        if self.efield:
+            Et = csx.AddDump(os.path.join(self.fvtr_dir, "Et_"), file_type=0)
+            start = [
+                -self.substrate_len / 2,
+                -self.substrate_width / 2,
+                -self.pcb.layer_sep[0] / 2,
+            ]
+            stop = [
+                self.substrate_len / 2,
+                self.substrate_width / 2,
+                -self.pcb.layer_sep[0] / 2,
+            ]
+            Et.AddBox(start, stop)
+
+        # write CSX file
+        csx.Write2XML(self.fcsx)
+
+        tmpdir = tempfile.TemporaryDirectory()
+        fdtd.Run(tmpdir.name, cleanup=True)
+
+        self.freq_bins = np.linspace(
+            self.f0 - self.fc, self.f0 + self.fc, num_freq_bins
+        )
+        self.calc_ports = [None] * num_probes
+        for i, _ in enumerate(self.calc_ports):
+            self.calc_ports[i] = Port(
+                None,
+                None,
+                None,
+                None,
+                None,
+                U_filenames=["ut_" + str(i)],
+                I_filenames=["it_" + str(i)],
+            )
+            self.calc_ports[i].CalcPort(
+                tmpdir.name, self.freq_bins, ref_impedance=self.z0_ref
+            )
+
+        self.sim_done = True
+
+    def port_z0(self) -> List[List[float]]:
+        """
+        Get impedance as a function of frequency for each port.
+        """
+        if not self.sim_done:
+            raise RuntimeWarning(
+                "Must run simulation before retreiving impedance values. "
+                "Doing nothing."
+            )
+        else:
+            z0 = [
+                np.absolute(self.calc_ports[i].uf_tot)
+                / np.absolute(self.calc_ports[i].if_tot)
+                for i, _ in enumerate(self.calc_ports)
+            ]
+
+            return z0
+
+    def avg_port_z0(self) -> List[float]:
+        """
+        Get impedance as a function of frequency averaged across all ports.
+        """
+        z0 = self.port_z0()
+        return np.average(z0, axis=0)
+
+    def view_csx(self):
+        """
+        View CSX structure. This blocks the calling thread and AppCSXCAD
+        must be closed before proceeding.
+        """
+        if not self.sim_done:
+            raise RuntimeWarning(
+                "Must run simulation before viewing CSX structure. "
+                "Doing nothing."
+            )
+        else:
+            run(["AppCSXCAD", self.fcsx])
+
+    def view_efield(self):
+        """
+        View E-field time dump. This blocks the calling thread and
+        Paraview must be closed before proceeding.
+        """
+        if not self.sim_done:
+            raise RuntimeWarning(
+                "Must run simulation before viewing E-field dump. "
+                "Doing nothing."
+            )
+        else:
+            run(
+                [
+                    "paraview",
+                    "--data={}".format(
+                        os.path.join(self.fvtr_dir, "Et__..vtr")
+                    ),
+                ]
+            )
 
 
 def microstrip_width_sweep(
