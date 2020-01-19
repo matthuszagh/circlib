@@ -693,7 +693,6 @@ class Microstrip:
         microstrip_width: float = None,
         microstrip_len: float = 100,
         substrate_width: float = 20,
-        substrate_len: float = 120,
         fcsx: str = None,
         fvtr_dir: str = None,
         efield: bool = False,
@@ -739,7 +738,6 @@ class Microstrip:
             self.microstrip_width = microstrip_width
         self.microstrip_len = microstrip_len
         self.substrate_width = substrate_width
-        self.substrate_len = substrate_len
         if fcsx is None:
             fcsx = tempfile.TemporaryFile().name
         else:
@@ -847,7 +845,7 @@ class Microstrip:
         substrate.AddBox(
             priority=0,
             start=[
-                -self.substrate_len / 2,
+                -self.microstrip_len / 2,
                 -self.substrate_width / 2,
                 -self.pcb.layer_sep[0],
             ],
@@ -865,15 +863,11 @@ class Microstrip:
             port_nr=0,
             R=self.z0_ref,
             start=[
-                -self.microstrip_len / 2 + (self.microstrip_len / 200),
+                -self.microstrip_len / 4,
                 -self.microstrip_width / 2,
                 -self.pcb.layer_sep[0],
             ],
-            stop=[
-                -self.microstrip_len / 2 + (self.microstrip_len / 200),
-                self.microstrip_width / 2,
-                0,
-            ],
+            stop=[-self.microstrip_len / 4, self.microstrip_width / 2, 0],
             p_dir="z",
             excite=1,
             priority=999,
@@ -881,37 +875,29 @@ class Microstrip:
         vprobe = [None] * num_probes
         iprobe = [None] * num_probes
 
+        probe_x_pos = np.linspace(
+            -self.microstrip_len / 4,
+            self.microstrip_len / 4,
+            num_probes + 2,
+            endpoint=True,
+        )
+        probe_x_pos = np.delete(probe_x_pos, 0)
+        probe_x_pos = np.delete(probe_x_pos, -1)
         # TODO num_probes here and iprobe doesn't quite work because
         # probes could be placed in PML
         for i, _ in enumerate(vprobe):
             vprobe[i] = csx.AddProbe("ut_" + str(i), 0)
             vprobe[i].AddBox(
-                start=[
-                    -self.microstrip_len / 2
-                    + ((i + 1) * self.microstrip_len / (num_probes + 1)),
-                    0,
-                    -self.pcb.layer_sep[0],
-                ],
-                stop=[
-                    -self.microstrip_len / 2
-                    + ((i + 1) * self.microstrip_len / (num_probes + 1)),
-                    0,
-                    0,
-                ],
+                start=[probe_x_pos[i], 0, -self.pcb.layer_sep[0]],
+                stop=[probe_x_pos[i], 0, 0],
             )
 
         for i, _ in enumerate(iprobe):
             iprobe[i] = csx.AddProbe("it_" + str(i), 1, norm_dir=0)
             iprobe[i].AddBox(
-                start=[
-                    -self.microstrip_len / 2
-                    + ((i + 1) * self.microstrip_len / (num_probes + 1)),
-                    -self.microstrip_width / 2,
-                    0,
-                ],
+                start=[probe_x_pos[i], -self.microstrip_width / 2, 0],
                 stop=[
-                    -self.microstrip_len / 2
-                    + ((i + 1) * self.microstrip_len / (num_probes + 1)),
+                    probe_x_pos[i],
                     self.microstrip_width / 2,
                     trace_height,
                 ],
@@ -925,7 +911,7 @@ class Microstrip:
             smooth=1.4,
             unit=unit,
             min_lines=5,
-            expand_bounds=[10, 0, 10, 10, 0, 10],
+            expand_bounds=[0, 0, 10, 10, 0, 10],
         )
         auto_mesh.AutoGenMesh()
 
@@ -933,7 +919,7 @@ class Microstrip:
         if self.efield:
             Et = csx.AddDump(os.path.join(self.fvtr_dir, "Et_"), file_type=0)
             start = [
-                -self.substrate_len / 2,
+                -self.microstrip_len / 2,
                 -self.substrate_width / 2,
                 -self.pcb.layer_sep[0] / 2,
             ]
