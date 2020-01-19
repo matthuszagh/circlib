@@ -1,4 +1,4 @@
-from bisect import insort_left, bisect_left, bisect_right
+from bisect import insort_left, bisect_left
 import concurrent.futures as futures
 from subprocess import run
 import tempfile
@@ -13,6 +13,15 @@ import numpy as np
 
 
 class AutoMesh:
+    """
+    Automatic mesh generation for OpenEMS CSX structures.
+
+    TODO check and correct if probes in PML.
+    TODO ensure at least one mesh line at intersection of metal and probe.
+    TODO mesh is subtly wrong (e.g. asymmetrical for cases where it should be
+    symmetrical).
+    """
+
     def __init__(
         self,
         csx,
@@ -92,13 +101,12 @@ class AutoMesh:
 
         Nonmetal primitives use a mesh resolution of lmin/10 and metal
         primitives use a mesh resolution of lmin/20. There are two
-        exceptions to this: (1) if a dimension of a meterial has length 0
-        (e.g. a planar metal sheet) a single mesh line is placed exactly
-        on that line, and (2) a nonzero length material must have a
-        minimum of 10 mesh lines (TODO this choice should be
-        evaluated). The 2nd exception will not violate the third's rule or
-        smoothness (that adjacent mesh lines not differ in separation by
-        more than a factor of 1.5, TODO which should also be evaluated).
+        exceptions to this: (1) if a dimension of a meterial has
+        length 0 (e.g. a planar metal sheet) a single mesh line is
+        placed exactly on that line, and (2) a nonzero length material
+        must have a minimum of 10 mesh lines . The 2nd exception will
+        not violate the third's rule or smoothness (that adjacent mesh
+        lines not differ in separation by more than a factor of 1.5).
         """
         # add metal mesh
         for prim in self.prims:
@@ -220,26 +228,27 @@ class AutoMesh:
                     del self.mesh_lines[dim][i]
                     # metal-metal boundary
                     if spacing_left == spacing_right:
-                        insort_left(
-                            self.mesh_lines[dim], pos - (self.mres / 3)
-                        )
-                        insort_left(
-                            self.mesh_lines[dim], pos + (self.mres / 3)
-                        )
+                        new_low = pos - (self.mres / 3)
+                        new_high = pos + (self.mres / 3)
+                        # no need to add new lines if we already have closer ones.
+                        if new_low > pos - spacing_left:
+                            insort_left(self.mesh_lines[dim], new_low)
+                        if new_high < pos + spacing_right:
+                            insort_left(self.mesh_lines[dim], new_high)
                     elif spacing_left < spacing_right:
-                        insort_left(
-                            self.mesh_lines[dim], pos - (self.mres / 3)
-                        )
-                        insort_left(
-                            self.mesh_lines[dim], pos + (2 * self.mres / 3)
-                        )
+                        new_low = pos - (self.mres / 3)
+                        new_high = pos + (2 * self.mres / 3)
+                        if new_low > pos - spacing_left:
+                            insort_left(self.mesh_lines[dim], new_low)
+                        if new_high < pos + spacing_right:
+                            insort_left(self.mesh_lines[dim], new_high)
                     else:
-                        insort_left(
-                            self.mesh_lines[dim], pos - (2 * self.mres / 3)
-                        )
-                        insort_left(
-                            self.mesh_lines[dim], pos + (self.mres / 3)
-                        )
+                        new_low = pos - (2 * self.mres / 3)
+                        new_high = pos + (self.mres / 3)
+                        if new_low > pos - spacing_left:
+                            insort_left(self.mesh_lines[dim], new_low)
+                        if new_high < pos + spacing_right:
+                            insort_left(self.mesh_lines[dim], new_high)
                     self._EnforceThirds(dim)
 
     def _RemoveTightMeshLines(self, dim):
@@ -749,8 +758,10 @@ class Microstrip:
         # track whether simulation already performed so that we only
         # need to simulate once
         self.sim_done = False
+        self.csx_done = False
         self.freq_bins = None
         self.calc_ports = None
+        self.fdtd = None
 
     def sim(
         self,
@@ -763,17 +774,50 @@ class Microstrip:
         write the results to a file.
 
         Args:
-            fout: output file name to write simulation results to. If ommitted,
-                  save the results to a temporary file.
             num_probes: number of impedance probes placed along trace. This
                         also determines outer dimension of return value.
             num_freq_bins: number of frequency bins. More frequency bins means
                        longer simulation time but possibly greater accuracy.
             zero_trace_height: approximate trace height as 0. This can greatly
                                reduce simulation time but may reduce accuracy.
+        """
+        self.gen_csx(
+            num_probes=num_probes, zero_trace_height=zero_trace_height
+        )
+        tmpdir = tempfile.TemporaryDirectory()
+        self.fdtd.Run(tmpdir.name, cleanup=True)
 
-        Returns:
-            2D list of impedance values for each probe and frequency bin.
+        self.freq_bins = np.linspace(
+            self.f0 - self.fc, self.f0 + self.fc, num_freq_bins
+        )
+        self.calc_ports = [None] * num_probes
+        for i, _ in enumerate(self.calc_ports):
+            self.calc_ports[i] = Port(
+                None,
+                None,
+                None,
+                None,
+                None,
+                U_filenames=["ut_" + str(i)],
+                I_filenames=["it_" + str(i)],
+            )
+            self.calc_ports[i].CalcPort(
+                tmpdir.name, self.freq_bins, ref_impedance=self.z0_ref
+            )
+
+        self.sim_done = True
+
+    def gen_csx(
+        self, num_probes: int = 3, zero_trace_height: bool = False,
+    ) -> None:
+        """
+        Generate CSX structure.
+
+        Args:
+            num_probes: number of impedance probes placed along trace. This
+                        also determines outer dimension of return value.
+            zero_trace_height: approximate trace height as 0. This can greatly
+                               reduce simulation time but may reduce accuracy.
         """
         # dimensions and parameters
         unit = 1e-3
@@ -811,21 +855,23 @@ class Microstrip:
         )
 
         # simulation
-        fdtd = openems.openEMS(EndCriteria=1e-5)
-        fdtd.SetCSX(csx)
-        fdtd.SetGaussExcite(self.f0, self.fc)
-        fdtd.SetBoundaryCond(["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"])
-        fdtd.AddLumpedPort(
+        self.fdtd = openems.openEMS(EndCriteria=1e-5)
+        self.fdtd.SetCSX(csx)
+        self.fdtd.SetGaussExcite(self.f0, self.fc)
+        self.fdtd.SetBoundaryCond(
+            ["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"]
+        )
+        self.fdtd.AddLumpedPort(
             port_nr=0,
             R=self.z0_ref,
             start=[
                 -self.microstrip_len / 2 + (self.microstrip_len / 200),
-                0,
+                -self.microstrip_width / 2,
                 -self.pcb.layer_sep[0],
             ],
             stop=[
                 -self.microstrip_len / 2 + (self.microstrip_len / 200),
-                0,
+                self.microstrip_width / 2,
                 0,
             ],
             p_dir="z",
@@ -833,14 +879,11 @@ class Microstrip:
             priority=999,
         )
         vprobe = [None] * num_probes
-        # vprobe_files = [None] * num_probes
         iprobe = [None] * num_probes
-        # iprobe_files = [None] * num_probes
 
         # TODO num_probes here and iprobe doesn't quite work because
         # probes could be placed in PML
         for i, _ in enumerate(vprobe):
-            # vprobe_files[i] = tempfile.TemporaryFile().name
             vprobe[i] = csx.AddProbe("ut_" + str(i), 0)
             vprobe[i].AddBox(
                 start=[
@@ -858,22 +901,19 @@ class Microstrip:
             )
 
         for i, _ in enumerate(iprobe):
-            # iprobe_files[i] = tempfile.TemporaryFile().name
             iprobe[i] = csx.AddProbe("it_" + str(i), 1, norm_dir=0)
             iprobe[i].AddBox(
                 start=[
                     -self.microstrip_len / 2
-                    # - (self.microstrip_len / 20)
                     + ((i + 1) * self.microstrip_len / (num_probes + 1)),
                     -self.microstrip_width / 2,
                     0,
                 ],
                 stop=[
                     -self.microstrip_len / 2
-                    # - (self.microstrip_len / 20)
                     + ((i + 1) * self.microstrip_len / (num_probes + 1)),
                     self.microstrip_width / 2,
-                    0,
+                    trace_height,
                 ],
             )
 
@@ -898,7 +938,7 @@ class Microstrip:
                 -self.pcb.layer_sep[0] / 2,
             ]
             stop = [
-                self.substrate_len / 2,
+                self.microstrip_len / 2,
                 self.substrate_width / 2,
                 -self.pcb.layer_sep[0] / 2,
             ]
@@ -906,29 +946,7 @@ class Microstrip:
 
         # write CSX file
         csx.Write2XML(self.fcsx)
-
-        tmpdir = tempfile.TemporaryDirectory()
-        fdtd.Run(tmpdir.name, cleanup=True)
-
-        self.freq_bins = np.linspace(
-            self.f0 - self.fc, self.f0 + self.fc, num_freq_bins
-        )
-        self.calc_ports = [None] * num_probes
-        for i, _ in enumerate(self.calc_ports):
-            self.calc_ports[i] = Port(
-                None,
-                None,
-                None,
-                None,
-                None,
-                U_filenames=["ut_" + str(i)],
-                I_filenames=["it_" + str(i)],
-            )
-            self.calc_ports[i].CalcPort(
-                tmpdir.name, self.freq_bins, ref_impedance=self.z0_ref
-            )
-
-        self.sim_done = True
+        self.csx_done = True
 
     def port_z0(self) -> List[List[float]]:
         """
@@ -960,10 +978,9 @@ class Microstrip:
         View CSX structure. This blocks the calling thread and AppCSXCAD
         must be closed before proceeding.
         """
-        if not self.sim_done:
+        if not self.csx_done:
             raise RuntimeWarning(
-                "Must run simulation before viewing CSX structure. "
-                "Doing nothing."
+                "Must generate CSX before viewing it. Doing nothing."
             )
         else:
             run(["AppCSXCAD", self.fcsx])
