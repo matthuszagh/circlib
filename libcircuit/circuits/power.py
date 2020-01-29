@@ -1,15 +1,15 @@
 #!/usr/bin/env python
 
 from skidl import Part, subcircuit
-from skidl.pyspice import gnd, node, generate_netlist, lib_search_paths, SPICE
+from skidl.pyspice import lib_search_paths, SPICE
 from libcircuit.cad import (
     eseries_val,
     resistor_footprint,
     capacitor_footprint,
 )
 from libcircuit.base import BaseCircuit
+from libcircuit.skidl import Subcircuit
 from libcircuit.spice import capacitor_equiv, resistor_equiv
-import matplotlib.pyplot as plt
 
 
 class CapacitanceMultiplier(BaseCircuit):
@@ -17,24 +17,25 @@ class CapacitanceMultiplier(BaseCircuit):
     Capacitance multiplier circuit.
     """
 
-    def __init__(self, iloadmax, ripplefreq, vin, vout, gnd):
+    def __init__(self, iloadmax, ripplefreq):
         """
-        Capacitance multiplier subcircuit. @iloadmax is the maximum load
-        current of all downstream devices. @ripplefreq is the ripple
-        frequency of the input voltage. When placing this at the output of
-        a voltage converter, use the converter's switching frequency. @vin
-        and @vout are the input and output nets, respectively.
+        Capacitance multiplier subcircuit.
+
+        :param iloadmax: maximum load current of all downstream
+            devices
+        :param ripplefreq: ripple frequency of the input voltage.
+            When placing this at the output of a voltage converter,
+            use the converter's switching frequency.
         """
-        self.rval = eseries_val(100 / iloadmax)
+        self.rval = eseries_val(10e3 / iloadmax)
         self.cval = eseries_val(10 / (self.rval * ripplefreq))
-        self.vin = vin
-        self.vout = vout
-        self.gnd = gnd
 
     @subcircuit
-    def cad(self):
+    def cad(self) -> Subcircuit:
         """
         Generate a physical circuit for use in a CAD netlist.
+
+        :returns: Subcircuit instance with pins [vin, vout, gnd]
         """
         self.r = Part(
             "Device",
@@ -55,16 +56,20 @@ class CapacitanceMultiplier(BaseCircuit):
         # TODO should use a more "intelligent" selection process
         self.npn = Part("Transistor_BJT", "2STN1550")
         self._connect_components()
+        return Subcircuit(pins=[self.r[1], self.transistor[3], self.c[2]])
 
     @subcircuit
-    def spice(self, use_parasitics: bool = True):
+    def spice(self, use_parasitics: bool = True) -> Subcircuit:
         """
         Generate a spice netlist for simulation.
+
+        :param use_parasitics: Use non-ideal, parasitic models for
+            resistors and capacitors.
         """
         if use_parasitics:
             self.r = resistor_equiv(value=self.rval)
             self.c = capacitor_equiv(value=self.cval)
-            self.rbase = resistor_equiv(value=100)
+            # self.rbase = resistor_equiv(value=100)
         else:
             self.r = Part("pyspice", "R", value=self.rval)
             self.c = Part("pyspice", "C", value=self.cval)
@@ -72,46 +77,17 @@ class CapacitanceMultiplier(BaseCircuit):
 
         self.d = Part("pyspice", "D", model="1N4001")
         lib_search_paths[SPICE].append("/home/matt/src/spicelib")
-        self.nmos = Part("FQD13N06", "FQD13N06")
-        # self.npn = Part("pyspice", "Q", model="2N2222A")
+        # self.transistor = Part("FQD13N06", "FQD13N06")
+        self.transistor = Part("pyspice", "Q", model="2N2222A")
         self._connect_components()
+        return Subcircuit(pins=[self.r[1], self.transistor[3], self.c[2]])
 
     def _connect_components(self):
         # self.vin += self.r[1], self.npn["C"]
-        self.vin += self.r[1], self.nmos[2]
+        self.r[1] += self.transistor[2]
         # self.r[2] += self.c[1], self.rbase[2], self.d[2]
-        self.r[2] += self.c[1], self.nmos[1], self.d[2]
+        self.r[2] += self.c[1], self.transistor[1], self.d[2]
         # self.rbase[1] += self.npn["B"]
-        # self.rbase[1] += self.nmos[2]
+        # self.rbase[1] += self.transistor[2]
         # self.npn["E"] += self.vout, self.d[1]
-        self.nmos[3] += self.vout, self.d[1]
-        self.c[2] += self.gnd
-
-
-if __name__ == "__main__":
-    # def simulate():
-    vin = Part("pyspice", "SINEV", offset=5, amplitude=50e-3)
-    rload = Part("pyspice", "R", value=10e3)
-    rload[1]
-    vin[2] += gnd, rload[2]
-    cap_mul = CapacitanceMultiplier(
-        iloadmax=1, ripplefreq=500e3, vin=vin[1], vout=rload[1], gnd=gnd
-    )
-    print(cap_mul.rval)
-    print(cap_mul.cval)
-    cap_mul.spice()
-    circ = generate_netlist(libs="/home/matt/src/spicelib")
-    sim = circ.simulator()
-    waveforms = sim.transient(step_time=100e-6, end_time=100e-3)
-    time = waveforms.time
-    vin = waveforms[node(vin[1])]
-    vout = waveforms[node(rload[1])]
-    fig = plt.figure()
-    plt.plot(time, vin)
-    plt.plot(time, vout)
-    plt.show()
-    # print("time\tvin\tvout")
-    # for (t, vi, vo) in zip(
-    #     time.as_ndarray(), vin.as_ndarray(), vout.as_ndarray()
-    # ):
-    #     print("{}\t{}\t{}".format(t, vi, vo))
+        self.transistor[3] += self.d[1]
