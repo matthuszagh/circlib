@@ -8,3 +8,4 @@ sim/openems/oshpark-4-layer/microstrip/sim
 **/*.log
 **/*.net
 /libcircuit/circuits/power_lib_sklib.py
+**/*.csx
