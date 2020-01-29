@@ -8,7 +8,6 @@ class Subcircuit:
 
     def __getitem__(self, key: int):
         return self.pins[key - 1]
-        # return getattr(self.pins, self.pins[key - 1])
 
     def __setitem__(self, key: int, value):
         self.pins[key - 1] = value
