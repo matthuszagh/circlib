@@ -54,16 +54,13 @@ class Type1PhaseDetectorDigital(BaseCircuit):
             rise_delay=1e-12,
             fall_delay=1e-12,
         )
-        self.adc1 = Part(
-            "pyspice", "A", io=["[anlg_in]", "[dig_out]"], model=self.adc_model
-        )
-        self.adc2 = Part(
-            "pyspice", "A", io=["[anlg_in]", "[dig_out]"], model=self.adc_model
+        self.adc = Part(
+            "pyspice", "A", io=["anlg_in[]", "dig_out[]"], model=self.adc_model
         )
         self.dac = Part(
             "pyspice",
             "A",
-            io=["[dig_in]", "[anlg_out]"],
+            io=["dig_in[]", "anlg_out[]"],
             model=XspiceModel(
                 "dac", "dac_bridge", out_low=0.0, out_high=self.vdd
             ),
@@ -71,7 +68,7 @@ class Type1PhaseDetectorDigital(BaseCircuit):
         self.xor = Part(
             "pyspice",
             "A",
-            io=["[in1 in2]", "out"],
+            io=["in[]", "out"],
             model=XspiceModel(
                 "xor",
                 "d_xor",
@@ -83,8 +80,8 @@ class Type1PhaseDetectorDigital(BaseCircuit):
         self._connect_components()
         return Subcircuit(
             pins=[
-                self.adc1["anlg_in"][0],
-                self.adc2["anlg_in"][0],
+                self.adc["anlg_in"][0],
+                self.adc["anlg_in"][1],
                 self.c[1],
                 self.c[2],
             ]
@@ -93,8 +90,8 @@ class Type1PhaseDetectorDigital(BaseCircuit):
     def _connect_components(self):
         """
         """
-        self.adc1["dig_out"][0] += self.xor["in1"][0]
-        self.adc2["dig_out"][0] += self.xor["in1"][1]
+        self.adc["dig_out"][0] += self.xor["in"][0]
+        self.adc["dig_out"][1] += self.xor["in"][1]
         self.xor["out"] += self.dac["dig_in"][0]
         self.dac["anlg_out"][0] += self.r[1]
         self.r[2] += self.c[1]
