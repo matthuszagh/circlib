@@ -1,5 +1,6 @@
 from bisect import insort_left, bisect_left
-import concurrent.futures as futures
+from pathos.multiprocessing import ProcessingPool as Pool
+from functools import partial
 from subprocess import run
 import tempfile
 import os
@@ -34,18 +35,20 @@ class AutoMesh:
         expand_bounds=[20, 20, 20, 20, 20, 20],
     ):
         """
-        @csx is the CSXCAD structure (return value of
-        CSXCAD.ContinuousStructure()).
-        @lmin is the minimum wavelength associated with the expected
-        frequency.
-        @mres is the metal resolution, specified as a factor of @lmin.
-        @sres is the substrate resolution, specified as a factor of @lmin.
-        @smooth is the factor by which adjacent cells are allowed to differ in
-        size.
-        @unit is the mesh size unit, which defaults to mm.
-        @min_lines is the minimum number of mesh lines for a primitive's
-        dimensional length, unless the length of that primitive's dimension
-        is precisely 0.
+        :param csx: the CSXCAD structure (return value of
+            CSXCAD.ContinuousStructure()).
+        :param lmin: the minimum wavelength associated with the
+            expected frequency.
+        :param mres: the metal resolution, specified as a factor of
+            lmin.
+        :param sres: the substrate resolution, specified as a factor
+            of lmin.
+        :param smooth: the factor by which adjacent cells are allowed
+            to differ in size.
+        :param unit: the mesh size unit, which defaults to mm.
+        :param min_lines: the minimum number of mesh lines for a
+            primitive's dimensional length, unless the length of that
+            primitive's dimension is precisely 0.
         """
         self.csx = csx
         self.lmin = lmin
@@ -379,7 +382,7 @@ class AutoMesh:
 
     def _UpdateRanges(self, lower, upper, dim):
         """
-        @dim is the dimension: 0, 1, 2 for x, y, or z.
+        :param dim: is the dimension: 0, 1, 2 for x, y, or z.
         """
         self.ranges_meshed[dim].append([lower, upper])
         self._ConsolidateMeshedRanges(dim)
@@ -502,17 +505,16 @@ class PCB:
         layer_thickness: List[float],
     ):
         """
-        Args:
-            layers: number of conductive layers
-            sub_epsr: substrate dielectric constant. dictionary of frequency
-                      (Hz) and associated dielectric.
-            sub_rho: volume resistivity (ohm*mm)
-            layer_sep: separations (in mm) between adjacent copper layers. A
-                       list where the first value is the separation between
-                       the top layer and second layer, etc. This is
-                       equivalently the substrate thickness.
-            layer_thickness: thickness of each conductive layer (in mm). Again
-                             proceeds from top to bottom layer.
+        :param layers: number of conductive layers
+        :param sub_epsr: substrate dielectric constant.  dictionary of
+            frequency (Hz) and associated dielectric.
+        :param sub_rho: volume resistivity (ohm*mm)
+        :param layer_sep: separations (in mm) between adjacent copper
+            layers.  A list where the first value is the separation
+            between the top layer and second layer, etc.  This is
+            equivalently the substrate thickness.
+        :param layer_thickness: thickness of each conductive layer (in
+            mm).  Again proceeds from top to bottom layer.
         """
         self.layers = layers
         self.sub_epsr = sorted(sub_epsr, key=lambda epsr: epsr[0])
@@ -523,14 +525,12 @@ class PCB:
 
     def epsr_at_freq(self, freq: float):
         """
-        Approximate the dielectric at a given frequency given the provided
-        epsr values.
+        Approximate the dielectric at a given frequency given the
+        provided epsr values.
 
-        Args:
-            freq: frequency of interest (Hz)
+        :param freq: frequency of interest (Hz)
 
-        Returns:
-            dielectric constant
+        :param returns: dielectric constant
         """
         if freq <= self.sub_epsr[0][0]:
             return self.sub_epsr[0][1]
@@ -571,19 +571,18 @@ common_pcbs = {
 
 def wheeler_z0(w: float, t: float, er: float, h: float) -> float:
     """
-    Calculate the microstrip characteristic impedance for a given width
-    using Wheeler's equation. Wheeler's equation can be found at:
+    Calculate the microstrip characteristic impedance for a given
+    width using Wheeler's equation.  Wheeler's equation can be found
+    at:
 
     https://en.wikipedia.org/wiki/Microstrip#Characteristic_impedance
 
-    Args:
-        w: microstrip trace width (mm)
-        t: trace thickness (mm)
-        er: substrate relative permittivity
-        h: substrate height (thickness) (mm)
+    :param w: microstrip trace width (mm)
+    :param t: trace thickness (mm)
+    :param er: substrate relative permittivity
+    :param h: substrate height (thickness) (mm)
 
-    Returns:
-        characteristic impedance
+    :returns: characteristic impedance
     """
     z0 = 376.730313668
     w *= 1e-3
@@ -635,17 +634,15 @@ def wheeler_z0_width(
     Calculate the microstrip width for a given characteristic
     impedance using Wheeler's formula.
 
-    Args:
-        z0: characteristic impedance (ohm)
-        t: trace thickness (mm)
-        er: substrate relative permittivity
-        h: substrate height (thickness) (mm)
-        tol: acceptable impedance tolerance (ohm)
-        guess: an initial guess for the width (mm). This can improve
-               convergence time when the approximate width is known.
+    :param z0: characteristic impedance (ohm)
+    :param t: trace thickness (mm)
+    :param er: substrate relative permittivity
+    :param h: substrate height (thickness) (mm)
+    :param tol: acceptable impedance tolerance (ohm)
+    :param guess: an initial guess for the width (mm).  This can
+        improve convergence time when the approximate width is known.
 
-    Returns:
-        trace width (mm)
+    :returns: trace width (mm)
     """
     width = guess
     zm = wheeler_z0(w=width, t=t, er=er, h=h)
@@ -698,30 +695,30 @@ class Microstrip:
         efield: bool = False,
     ):
         """
-        Args:
-            pcb: PCB object
-            f0: center frequency (Hz)
-            fc: corner frequency, given as difference from f0 (Hz)
-            z0_ref: desired impedance (ohm)
-            microstrip_width: microstrip trace width (mm). If ommitted, an
-                              analytical best guess for z0_ref and f0 will be
-                              used (see `wheeler_z0_width`).
-            microstrip_len: microstrip trace length (mm). This value isn't
-                            critical but does need to be large enough for the
-                            openems simulation to work. If unsure, stick with
-                            the default.
-            substrate_width: substrate width (mm)
-            substrate_len: substrate length (mm). Must be at least as large as
-                           the microstrip length. If unsure, use the default.
-            fcsx: CSX file name to write CSXCAD structure to. If ommitted, do
-                  not save the file. Omitting this does not prevent you from
-                  viewing the CSX structure, just from saving it for later.
-                  Relative to current directory.
-            fvtr_dir: directory for VTR E-field dump files. Files will be
-                      prefixed with 'Et_'. If ommitted, E-field can still be
-                      viewed unless `efield` is set to false in which case this
-                      parameter has no effect.
-            efield: dump E-field time values for viewing.
+        :param pcb: PCB object
+        :param f0: center frequency (Hz)
+        :param fc: corner frequency, given as difference from f0 (Hz)
+        :param z0_ref: desired impedance (ohm)
+        :param microstrip_width: microstrip trace width (mm).  If
+            ommitted, an analytical best guess for z0_ref and f0 will
+            be used (see `wheeler_z0_width`).
+        :param microstrip_len: microstrip trace length (mm).  This
+            value isn't critical but does need to be large enough for
+            the openems simulation to work.  If unsure, stick with the
+            default.
+        :param substrate_width: substrate width (mm)
+        :param substrate_len: substrate length (mm).  Must be at least
+            as large as the microstrip length.  If unsure, use the
+            default.
+        :param fcsx: CSX file name to write CSXCAD structure to.  If
+            ommitted, do not save the file.  Omitting this does not
+            prevent you from viewing the CSX structure, just from
+            saving it for later.  Relative to current directory.
+        :param fvtr_dir: directory for VTR E-field dump files.  Files
+            will be prefixed with 'Et_'.  If ommitted, E-field can
+            still be viewed unless `efield` is set to false in which
+            case this parameter has no effect.
+        :param efield: dump E-field time values for viewing.
         """
         self.pcb = pcb
         self.f0 = f0
@@ -739,14 +736,14 @@ class Microstrip:
         self.microstrip_len = microstrip_len
         self.substrate_width = substrate_width
         if fcsx is None:
-            fcsx = tempfile.TemporaryFile().name
+            self.fcsx = tempfile.mkstemp()[1]
         else:
             self.fcsx = os.path.abspath(fcsx)
 
         self.efield = efield
         if fvtr_dir is None:
             if efield is not None:
-                fvtr_dir = tempfile.TemporaryDirectory().name
+                self.fvtr_dir = tempfile.mkdtemp
         else:
             self.fvtr_dir = os.path.abspath(fvtr_dir)
             if os.path.exists(self.fvtr_dir):
@@ -763,32 +760,34 @@ class Microstrip:
 
     def sim(
         self,
-        num_probes: int = 3,
-        num_freq_bins: int = 500,
+        num_probes: int = 10,
+        num_freq_bins: int = 501,
         zero_trace_height: bool = False,
-    ) -> None:
+    ):
         """
-        Run an openems simulation for the current microstrip structure and
-        write the results to a file.
+        Run an openems simulation for the current microstrip structure
+        and write the results to a file.
 
-        Args:
-            num_probes: number of impedance probes placed along trace. This
-                        also determines outer dimension of return value.
-            num_freq_bins: number of frequency bins. More frequency bins means
-                       longer simulation time but possibly greater accuracy.
-            zero_trace_height: approximate trace height as 0. This can greatly
-                               reduce simulation time but may reduce accuracy.
+        :param num_probes: number of impedance probes placed along
+            trace.  This also determines outer dimension of return
+            value.
+        :param num_freq_bins: number of frequency bins.  More
+            frequency bins means longer simulation time but possibly
+            greater accuracy.
+        :param zero_trace_height: approximate trace height as 0.  This
+            can greatly reduce simulation time but may reduce
+            accuracy.
         """
         self.gen_csx(
             num_probes=num_probes, zero_trace_height=zero_trace_height
         )
-        tmpdir = tempfile.TemporaryDirectory()
-        self.fdtd.Run(tmpdir.name, cleanup=True)
+        tmpdir = tempfile.mkdtemp()
+        self.fdtd.Run(tmpdir, cleanup=True)
 
         self.freq_bins = np.linspace(
             self.f0 - self.fc, self.f0 + self.fc, num_freq_bins
         )
-        self.calc_ports = [None] * num_probes
+        self.calc_ports = [None for i in range(num_probes)]
         for i, _ in enumerate(self.calc_ports):
             self.calc_ports[i] = Port(
                 None,
@@ -800,13 +799,15 @@ class Microstrip:
                 I_filenames=["it_" + str(i)],
             )
             self.calc_ports[i].CalcPort(
-                tmpdir.name, self.freq_bins, ref_impedance=self.z0_ref
+                tmpdir, self.freq_bins, ref_impedance=self.z0_ref
             )
 
         self.sim_done = True
+        return self.avg_port_z0()
+        # return self
 
     def gen_csx(
-        self, num_probes: int = 3, zero_trace_height: bool = False,
+        self, num_probes: int = 10, zero_trace_height: bool = False,
     ) -> None:
         """
         Generate CSX structure.
@@ -872,8 +873,8 @@ class Microstrip:
             excite=1,
             priority=999,
         )
-        vprobe = [None] * num_probes
-        iprobe = [None] * num_probes
+        vprobe = [None for i in range(num_probes)]
+        iprobe = [None for i in range(num_probes)]
 
         probe_x_pos = np.linspace(
             -self.microstrip_len / 4,
@@ -992,207 +993,100 @@ class Microstrip:
             )
 
 
-def microstrip_width_sweep(
+def microstrip_sweep_width(
+    pcb: PCB,
     f0: float,
     fc: float,
-    thick: float,
-    epsr: float,
-    resistivity: float,
     z0_ref: float,
-    width_bounds: [float, float],
-    num_points: int,
-    fout: str,
-) -> None:
+    width: float = None,
+    width_dev_factor: float = 0.1,
+    num_points: int = 11,
+) -> List[Tuple[float, float]]:
     """
-    Calculate microstrip characteristic impedance as a function of trace width.
+    Calculate microstrip characteristic impedance as a function of
+    trace width.
 
-    Args:
-        f0: center frequency (Hz)
-        fc: 20dB cutoff frequency, as the deviation from the center frequency
-        thick: substrate thickness (mm)
-        epsr: substrate dielectric constant
-        z0_ref: desired impedance
-        resistivity: substrate resistivity
-        width_bounds: [lower_width, upper_width] sweep over this width range
-        num_points: number of width values to calculate. This value has a
-                    significant effect on simulation time since each point
-                    is calculated in its own thread. Therefore, to minimize
-                    computation time, its recommended to choose some multiple
-                    of the number of cores available on the simulation machine.
-                    The total simulation time will be roughly equal to the time
-                    it takes to compute 1 point times the ratio of the number
-                    of points to number of machine cores.
-        fout: filename where results should be written. relative to current
-              dir.
+    :param pcb: PCB object
+    :param f0: center frequency (Hz)
+    :param fc: corner frequency, given as difference from f0 (Hz)
+    :param z0_ref: desired impedance (ohm)
+    :param width: center width (mm).  If ommitted, find the best guess
+        width for f0 analytically.
+    :param width_dev_factor: determines width sweep bounds
+        [width*(1-wdf),width*(1+wdf)]
+    :param num_points: number of width values to calculate.  This
+        value has a significant effect on simulation time since each
+        point is calculated in its own thread.  Therefore, to minimize
+        computation time, its recommended to choose some multiple of
+        the number of cores available on the simulation machine.  The
+        total simulation time will be roughly equal to the time it
+        takes to compute 1 point times the ratio of the number of
+        points to number of machine cores.
+    :param fout: filename where results should be written.  relative
+        to current dir.
+
+    :returns: A list of tuples, where the first tuple element is a
+        width and the second is the corresponding impedance value.
     """
-    widths = np.linspace(width_bounds[0], width_bounds[1], num_points)
-    subprocs = [None] * len(widths)
-    executer = futures.ProcessPoolExecutor()
+    if width is None:
+        width = wheeler_z0_width(
+            z0=z0_ref,
+            t=pcb.layer_thickness[0],
+            er=pcb.epsr_at_freq(f0),
+            h=pcb.layer_sep[0],
+        )
+
+    widths = np.linspace(
+        width * (1 - width_dev_factor),
+        width * (1 + width_dev_factor),
+        num_points,
+    )
+    microstrips = [None for i in range(num_points)]
     for i, width in enumerate(widths):
-        subprocs[i] = executer.submit(
-            microstrip_impedance,
-            f0,
-            fc,
-            thick,
-            epsr,
-            resistivity,
-            width,
-            z0_ref,
+        microstrips[i] = Microstrip(
+            pcb=pcb, f0=f0, fc=fc, z0_ref=z0_ref, microstrip_width=width
         )
 
-    with open(fout, "w") as f:
-        f.write(
-            "{:10} {:10} {:10} {:10}\n".format("width", "zlow", "z0", "zhigh")
+    pool = Pool()
+    freq_bins = 501
+    func = partial(
+        Microstrip.sim,
+        num_probes=10,
+        num_freq_bins=freq_bins,
+        zero_trace_height=False,
+    )
+    z0s = [None for i in range(num_points)]
+    z0s = list(pool.map(func, microstrips))
+
+    ret_vals = [[None, None] for i in range(num_points)]
+    for i, _ in enumerate(z0s):
+        f0_bin_idx = int(freq_bins / 2)
+        z0 = z0s[i]
+        ret_vals[i][0] = widths[i]
+        ret_vals[i][1] = z0[f0_bin_idx]
+
+    return ret_vals
+
+
+if __name__ == "__main__":
+    pcb = common_pcbs["oshpark4"]
+    f0 = 5.6e9
+    sim_vals = microstrip_sweep_width(
+        pcb=pcb, f0=f0, fc=4e8, z0_ref=50, num_points=31
+    )
+    analytic_vals = [
+        wheeler_z0(
+            w=sim_vals[i][0],
+            t=pcb.layer_thickness[0],
+            er=pcb.epsr_at_freq(f0),
+            h=pcb.layer_sep[0],
         )
-        for i, _ in enumerate(subprocs):
-            [zlow, z0, zhigh] = subprocs[i].result()
-            f.write(
-                "{:10f} {:10f} {:10f} {:10f}\n".format(
-                    widths[i], zlow, z0, zhigh
-                )
+        for i, _ in enumerate(sim_vals)
+    ]
+    print("{:10} {:10} {:10}".format("width", "sim", "analytic"))
+    for i, _ in enumerate(sim_vals):
+        print(
+            "{:10f} {:10f} {:10f}".format(
+                sim_vals[i][0], sim_vals[i][1], analytic_vals[i]
             )
-
-
-def microstrip_impedance(
-    f0: float,
-    fc: float,
-    thick: float,
-    epsr: float,
-    resistivity: float,
-    width: float,
-    z0_ref: float,
-) -> [float, float, float]:
-    """
-    Calculate the characeristic impedance for a microstrip line for a
-    frequency range and given width.
-
-    Returns:
-        [z0_flow, z0_fcenter, z0_fhigh] where flow=f0-fc, fcenter=f0,
-        and fhigh=f0+fc.
-    """
-    # dimensions and parameters
-    unit = 1e-3
-    microstrip_len = 100
-    substrate_width = 20
-    substrate_len = 1.2 * microstrip_len
-    lmin = C0 / ((f0 + fc) * unit)
-    substrate_kappa = 1 / resistivity
-
-    # structures
-    csx = csxcad.ContinuousStructure()
-    microstrip = csx.AddMetal("PEC")
-    microstrip.AddBox(
-        priority=10,
-        start=[-microstrip_len / 2, -width / 2, 0],
-        stop=[microstrip_len / 2, width / 2, 0],
-    )
-    substrate = csx.AddMaterial(
-        "substrate", epsilon=epsr, kappa=substrate_kappa
-    )
-    substrate.AddBox(
-        priority=0,
-        start=[-substrate_len / 2, -substrate_width / 2, -thick],
-        stop=[substrate_len / 2, substrate_width / 2, 0],
-    )
-
-    # simulation
-    fdtd = openems.openEMS(EndCriteria=1e-5)
-    fdtd.SetCSX(csx)
-    fdtd.SetGaussExcite(f0, fc)
-    fdtd.SetBoundaryCond(["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"])
-    fdtd.AddLumpedPort(
-        port_nr=0,
-        R=z0_ref,
-        start=[-microstrip_len / 2 + (microstrip_len / 200), 0, -thick],
-        stop=[-microstrip_len / 2 + (microstrip_len / 200), 0, 0],
-        p_dir="z",
-        excite=1,
-        priority=999,
-    )
-    vprobe = [None, None, None]
-    iprobe = [None, None, None]
-
-    for i, probe in enumerate(vprobe):
-        vprobe[i] = csx.AddProbe("vprobe_" + str(width) + "_" + str(i), 0)
-        vprobe[i].AddBox(
-            start=[
-                -microstrip_len / 2 + ((i + 1) * microstrip_len / 4),
-                0,
-                -thick,
-            ],
-            stop=[-microstrip_len / 2 + ((i + 1) * microstrip_len / 4), 0, 0,],
         )
-
-    for i, probe in enumerate(iprobe):
-        iprobe[i] = csx.AddProbe(
-            "iprobe_" + str(width) + "_" + str(i), 1, norm_dir=0
-        )
-        iprobe[i].AddBox(
-            start=[
-                -microstrip_len / 2
-                - (microstrip_len / 20)
-                + ((i + 1) * microstrip_len / 4),
-                -width / 2,
-                0,
-            ],
-            stop=[
-                -microstrip_len / 2
-                - (microstrip_len / 20)
-                + ((i + 1) * microstrip_len / 4),
-                width / 2,
-                0,
-            ],
-        )
-
-    auto_mesh = AutoMesh(
-        csx,
-        lmin,
-        mres=1 / 20,
-        sres=1 / 10,
-        smooth=1.4,
-        unit=unit,
-        min_lines=5,
-        expand_bounds=[10, 0, 10, 10, 0, 10],
-    )
-    auto_mesh.AutoGenMesh()
-
-    tmpdir = tempfile.TemporaryDirectory()
-    fdtd.Run(tmpdir.name, cleanup=True)
-
-    num_freq = 2000
-    freq = np.linspace(f0 - fc, f0 + fc, num_freq)
-    z0_ports = [None, None, None]
-    for n, _ in enumerate(z0_ports):
-        z0_ports[n] = Port(
-            None,
-            None,
-            None,
-            None,
-            None,
-            U_filenames=["vprobe_" + str(width) + "_" + str(n)],
-            I_filenames=["iprobe_" + str(width) + "_" + str(n)],
-        )
-        z0_ports[n].CalcPort(tmpdir.name, freq, ref_impedance=z0_ref)
-
-    zlow = np.average(
-        [
-            np.absolute(z0_ports[i].uf_tot[0])
-            / np.absolute(z0_ports[i].if_tot[0])
-            for i in range(3)
-        ]
-    )
-    z0 = np.average(
-        [
-            np.absolute(z0_ports[i].uf_tot[int(num_freq / 2 - 1)])
-            / np.absolute(z0_ports[i].if_tot[int(num_freq / 2 - 1)])
-            for i in range(3)
-        ]
-    )
-    zhigh = np.average(
-        [
-            np.absolute(z0_ports[i].uf_tot[-1])
-            / np.absolute(z0_ports[i].if_tot[-1])
-            for i in range(3)
-        ]
-    )
-    return [zlow, z0, zhigh]
