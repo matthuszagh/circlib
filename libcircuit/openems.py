@@ -812,11 +812,12 @@ class Microstrip:
         """
         Generate CSX structure.
 
-        Args:
-            num_probes: number of impedance probes placed along trace. This
-                        also determines outer dimension of return value.
-            zero_trace_height: approximate trace height as 0. This can greatly
-                               reduce simulation time but may reduce accuracy.
+        :param num_probes: number of impedance probes placed along
+            trace.  This also determines outer dimension of return
+            value.
+        :param zero_trace_height: approximate trace height as 0.  This
+            can greatly reduce simulation time but may reduce
+            accuracy.  Args: num_probes: zero_trace_height:
         """
         # dimensions and parameters
         unit = 1e-3
