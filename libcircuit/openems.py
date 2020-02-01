@@ -9,7 +9,7 @@ from typing import List, Tuple
 from CSXCAD import CSXCAD as csxcad
 import openEMS as openems
 from openEMS.physical_constants import C0
-from openEMS.ports import Port
+from openEMS.ports import UI_data
 import numpy as np
 
 
@@ -742,14 +742,15 @@ class Microstrip:
 
         self.efield = efield
         if fvtr_dir is None:
-            if efield is not None:
-                self.fvtr_dir = tempfile.mkdtemp
+            if efield:
+                self.fvtr_dir = tempfile.mkdtemp()
         else:
             self.fvtr_dir = os.path.abspath(fvtr_dir)
             if os.path.exists(self.fvtr_dir):
                 rmtree(self.fvtr_dir)
             os.mkdir(self.fvtr_dir)
 
+        self.csx = None
         # track whether simulation already performed so that we only
         # need to simulate once
         self.sim_done = False
@@ -759,18 +760,12 @@ class Microstrip:
         self.fdtd = None
 
     def sim(
-        self,
-        num_probes: int = 10,
-        num_freq_bins: int = 501,
-        zero_trace_height: bool = False,
+        self, num_freq_bins: int = 501, zero_trace_height: bool = False,
     ):
         """
         Run an openems simulation for the current microstrip structure
         and write the results to a file.
 
-        :param num_probes: number of impedance probes placed along
-            trace.  This also determines outer dimension of return
-            value.
         :param num_freq_bins: number of frequency bins.  More
             frequency bins means longer simulation time but possibly
             greater accuracy.
@@ -778,43 +773,23 @@ class Microstrip:
             can greatly reduce simulation time but may reduce
             accuracy.
         """
-        self.gen_csx(
-            num_probes=num_probes, zero_trace_height=zero_trace_height
-        )
+        self.gen_csx(zero_trace_height=zero_trace_height)
         tmpdir = tempfile.mkdtemp()
         self.fdtd.Run(tmpdir, cleanup=True)
 
         self.freq_bins = np.linspace(
             self.f0 - self.fc, self.f0 + self.fc, num_freq_bins
         )
-        self.calc_ports = [None for i in range(num_probes)]
-        for i, _ in enumerate(self.calc_ports):
-            self.calc_ports[i] = Port(
-                None,
-                None,
-                None,
-                None,
-                None,
-                U_filenames=["ut_" + str(i)],
-                I_filenames=["it_" + str(i)],
-            )
-            self.calc_ports[i].CalcPort(
-                tmpdir, self.freq_bins, ref_impedance=self.z0_ref
-            )
+
+        self.ReadUIData(sim_path=tmpdir, freq=self.freq_bins)
 
         self.sim_done = True
-        return self.avg_port_z0()
-        # return self
+        return np.absolute(self.Z_ref)
 
-    def gen_csx(
-        self, num_probes: int = 10, zero_trace_height: bool = False,
-    ) -> None:
+    def gen_csx(self, zero_trace_height: bool = False) -> None:
         """
         Generate CSX structure.
 
-        :param num_probes: number of impedance probes placed along
-            trace.  This also determines outer dimension of return
-            value.
         :param zero_trace_height: approximate trace height as 0.  This
             can greatly reduce simulation time but may reduce
             accuracy.  Args: num_probes: zero_trace_height:
@@ -828,8 +803,8 @@ class Microstrip:
             trace_height = self.pcb.layer_thickness[0]
 
         # structures
-        csx = csxcad.ContinuousStructure()
-        microstrip = csx.AddMetal("PEC")
+        self.csx = csxcad.ContinuousStructure()
+        microstrip = self.csx.AddMetal("PEC")
         microstrip.AddBox(
             priority=10,
             start=[-self.microstrip_len / 2, -self.microstrip_width / 2, 0],
@@ -839,7 +814,7 @@ class Microstrip:
                 trace_height,
             ],
         )
-        substrate = csx.AddMaterial(
+        substrate = self.csx.AddMaterial(
             "substrate",
             epsilon=self.pcb.epsr_at_freq(self.f0),
             kappa=self.pcb.sub_kappa,
@@ -856,7 +831,7 @@ class Microstrip:
 
         # simulation
         self.fdtd = openems.openEMS(EndCriteria=1e-5)
-        self.fdtd.SetCSX(csx)
+        self.fdtd.SetCSX(self.csx)
         self.fdtd.SetGaussExcite(self.f0, self.fc)
         self.fdtd.SetBoundaryCond(
             ["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"]
@@ -874,39 +849,9 @@ class Microstrip:
             excite=1,
             priority=999,
         )
-        vprobe = [None for i in range(num_probes)]
-        iprobe = [None for i in range(num_probes)]
-
-        probe_x_pos = np.linspace(
-            -self.microstrip_len / 4,
-            self.microstrip_len / 4,
-            num_probes + 2,
-            endpoint=True,
-        )
-        probe_x_pos = np.delete(probe_x_pos, 0)
-        probe_x_pos = np.delete(probe_x_pos, -1)
-        # TODO num_probes here and iprobe doesn't quite work because
-        # probes could be placed in PML
-        for i, _ in enumerate(vprobe):
-            vprobe[i] = csx.AddProbe("ut_" + str(i), 0)
-            vprobe[i].AddBox(
-                start=[probe_x_pos[i], 0, -self.pcb.layer_sep[0]],
-                stop=[probe_x_pos[i], 0, 0],
-            )
-
-        for i, _ in enumerate(iprobe):
-            iprobe[i] = csx.AddProbe("it_" + str(i), 1, norm_dir=0)
-            iprobe[i].AddBox(
-                start=[probe_x_pos[i], -self.microstrip_width / 2, 0],
-                stop=[
-                    probe_x_pos[i],
-                    self.microstrip_width / 2,
-                    trace_height,
-                ],
-            )
 
         auto_mesh = AutoMesh(
-            csx,
+            self.csx,
             lmin,
             mres=1 / 20,
             sres=1 / 10,
@@ -917,9 +862,47 @@ class Microstrip:
         )
         auto_mesh.AutoGenMesh()
 
+        csx_grid = self.csx.GetGrid()
+        num_lines = csx_grid.GetQtyLines(0)
+        mid_idx = int(num_lines / 2)
+        vprobe_x_pos = [
+            csx_grid.GetLine(0, mid_idx - 1),
+            csx_grid.GetLine(0, mid_idx),
+            csx_grid.GetLine(0, mid_idx + 1),
+        ]
+        self.U_delta = np.diff(vprobe_x_pos)
+        iprobe_x_pos = [
+            (vprobe_x_pos[0] + vprobe_x_pos[1]) / 2,
+            (vprobe_x_pos[1] + vprobe_x_pos[2]) / 2,
+        ]
+        self.I_delta = np.diff(iprobe_x_pos)
+
+        vprobe = [None for i in range(len(vprobe_x_pos))]
+        iprobe = [None for i in range(len(iprobe_x_pos))]
+
+        for i, _ in enumerate(vprobe):
+            vprobe[i] = self.csx.AddProbe("ut_" + str(i), 0)
+            vprobe[i].AddBox(
+                start=[vprobe_x_pos[i], 0, -self.pcb.layer_sep[0]],
+                stop=[vprobe_x_pos[i], 0, 0],
+            )
+
+        for i, _ in enumerate(iprobe):
+            iprobe[i] = self.csx.AddProbe("it_" + str(i), 1, norm_dir=0)
+            iprobe[i].AddBox(
+                start=[iprobe_x_pos[i], -self.microstrip_width / 2, 0],
+                stop=[
+                    iprobe_x_pos[i],
+                    self.microstrip_width / 2,
+                    trace_height,
+                ],
+            )
+
         # E-field recording
         if self.efield:
-            Et = csx.AddDump(os.path.join(self.fvtr_dir, "Et_"), file_type=0)
+            Et = self.csx.AddDump(
+                os.path.join(self.fvtr_dir, "Et_"), file_type=0
+            )
             start = [
                 -self.microstrip_len / 2,
                 -self.substrate_width / 2,
@@ -933,33 +916,40 @@ class Microstrip:
             Et.AddBox(start, stop)
 
         # write CSX file
-        csx.Write2XML(self.fcsx)
+        self.csx.Write2XML(self.fcsx)
         self.csx_done = True
 
-    def port_z0(self) -> List[List[float]]:
-        """
-        Get impedance as a function of frequency for each port.
-        """
-        if not self.sim_done:
-            raise RuntimeWarning(
-                "Must run simulation before retreiving impedance values. "
-                "Doing nothing."
-            )
-        else:
-            z0 = [
-                np.absolute(self.calc_ports[i].uf_tot)
-                / np.absolute(self.calc_ports[i].if_tot)
-                for i, _ in enumerate(self.calc_ports)
-            ]
+    def ReadUIData(self, sim_path, freq, signal_type="pulse"):
+        U_filenames = ["ut_" + str(i) for i in range(3)]
+        I_filenames = ["it_" + str(i) for i in range(2)]
 
-            return z0
+        self.u_data = UI_data(U_filenames, sim_path, freq, signal_type)
+        self.uf_tot = self.u_data.ui_f_val[1]
 
-    def avg_port_z0(self) -> List[float]:
-        """
-        Get impedance as a function of frequency averaged across all ports.
-        """
-        z0 = self.port_z0()
-        return np.average(z0, axis=0)
+        self.i_data = UI_data(I_filenames, sim_path, freq, signal_type)
+        self.if_tot = 0.5 * (self.i_data.ui_f_val[0] + self.i_data.ui_f_val[1])
+
+        unit = self.csx.GetGrid().GetDeltaUnit()
+        print(unit)
+        Et = self.u_data.ui_f_val[1]
+        dEt = (self.u_data.ui_f_val[2] - self.u_data.ui_f_val[0]) / (
+            np.sum(np.abs(self.U_delta)) * unit
+        )
+        Ht = (
+            self.if_tot
+        )  # space averaging: Ht is now defined at the same pos as Et
+        dHt = (self.i_data.ui_f_val[1] - self.i_data.ui_f_val[0]) / (
+            np.abs(self.I_delta[0]) * unit
+        )
+
+        beta = np.sqrt(-dEt * dHt / (Ht * Et))
+        beta[
+            np.real(beta) < 0
+        ] *= -1  # determine correct sign (unlike the paper)
+        self.beta = beta
+
+        # determine ZL
+        self.Z_ref = np.sqrt(Et * dEt / (Ht * dHt))
 
     def view_csx(self):
         """
@@ -1051,10 +1041,7 @@ def microstrip_sweep_width(
     pool = Pool()
     freq_bins = 501
     func = partial(
-        Microstrip.sim,
-        num_probes=10,
-        num_freq_bins=freq_bins,
-        zero_trace_height=False,
+        Microstrip.sim, num_freq_bins=freq_bins, zero_trace_height=False,
     )
     z0s = [None for i in range(num_points)]
     z0s = list(pool.map(func, microstrips))
@@ -1067,27 +1054,3 @@ def microstrip_sweep_width(
         ret_vals[i][1] = z0[f0_bin_idx]
 
     return ret_vals
-
-
-if __name__ == "__main__":
-    pcb = common_pcbs["oshpark4"]
-    f0 = 5.6e9
-    sim_vals = microstrip_sweep_width(
-        pcb=pcb, f0=f0, fc=4e8, z0_ref=50, num_points=31
-    )
-    analytic_vals = [
-        wheeler_z0(
-            w=sim_vals[i][0],
-            t=pcb.layer_thickness[0],
-            er=pcb.epsr_at_freq(f0),
-            h=pcb.layer_sep[0],
-        )
-        for i, _ in enumerate(sim_vals)
-    ]
-    print("{:10} {:10} {:10}".format("width", "sim", "analytic"))
-    for i, _ in enumerate(sim_vals):
-        print(
-            "{:10f} {:10f} {:10f}".format(
-                sim_vals[i][0], sim_vals[i][1], analytic_vals[i]
-            )
-        )
