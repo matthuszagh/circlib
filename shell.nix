@@ -8,6 +8,7 @@ let
   mh-python = pkgs.python3.withPackages (ps: with ps; [
     numpy
     matplotlib
+    pathos
     scipy
   ] ++ (with custompkgs; [
     libcircuit
