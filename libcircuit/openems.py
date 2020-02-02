@@ -224,6 +224,13 @@ class AutoMesh:
 
     # TODO should ensure that inserted mesh lines are not at metal boundaries
     def _EnforceThirds(self, dim):
+        """
+        Replace mesh lines at metal boundaries with a mesh line
+        1/3*res inside the metal boundary and 2/3*res outside.
+
+        :param dim: Dimension for which thirds rule should be
+            enforced.
+        """
         for i, pos in enumerate(self.mesh_lines[dim]):
             if (
                 pos in self.metal_bounds[dim]
@@ -250,31 +257,27 @@ class AutoMesh:
                     ):
                         new_low = pos - (spacing_left / 2)
                         new_high = pos + (spacing_left / 2)
-                        # no need to add new lines if we already have
-                        # closer ones.
-                        if new_low > pos - spacing_left:
-                            insort_left(self.mesh_lines[dim], new_low)
-                        if new_high < pos + spacing_right:
-                            insort_left(self.mesh_lines[dim], new_high)
                     # don't need to add tolerance for float comparison
                     # since metal-metal boundary check already did
                     # that
                     elif spacing_left < spacing_right:
                         new_low = pos - (spacing_left / 3)
                         new_high = pos + (2 * spacing_left / 3)
-                        insort_left(self.mesh_lines[dim], new_low)
-                        insort_left(self.mesh_lines[dim], new_high)
                     else:
                         new_low = pos - (2 * spacing_right / 3)
                         new_high = pos + (spacing_right / 3)
-                        insort_left(self.mesh_lines[dim], new_low)
-                        insort_left(self.mesh_lines[dim], new_high)
+
+                    insort_left(self.mesh_lines[dim], new_low)
+                    insort_left(self.mesh_lines[dim], new_high)
                     self._EnforceThirds(dim)
 
     def _RemoveTightMeshLines(self, dim):
         """
-        Remove adjacent mesh lines for dimension @dim with spacing less
-        than the smallest valid resolution.
+        Remove adjacent mesh lines for dimension @dim with spacing
+        less than the smallest valid resolution.
+
+        :param dim: Dimension in which to remove tightly spaced
+            meshes.
         """
         last_pos = self.mesh_lines[dim][0]
         for i, pos in enumerate(self.mesh_lines[dim]):
@@ -313,9 +316,6 @@ class AutoMesh:
 
     def _type_str(self, prim):
         return prim.GetProperty().GetTypeString()
-
-    # def _PrimMetalp(self, prim):
-    #     return prim.GetProperty().GetTypeString() == "Metal"
 
     def _GetPrimBounds(self, prim):
         orig_bounds = prim.GetBoundBox()
@@ -435,10 +435,22 @@ class AutoMesh:
                 and left_spacing - (self.smooth * right_spacing)
                 > self.smallest_res / 10
             ):
-                # only add lines if it makes the mesh smoother. If the
-                # separations differ by less than a factor of 2,
-                # adding a line will make surrounding mesh less smooth
-                if left_spacing / right_spacing <= 2:
+                ratio = left_spacing / right_spacing
+                if i == len(self.mesh_lines[dim]) - 2:
+                    # TODO we can probably do better than this
+                    outer_spacing = right_spacing
+                else:
+                    outer_spacing = self.mesh_lines[dim][i + 2] - (
+                        pos + right_spacing
+                    )
+                # if this condition satisfied, then we can move the
+                # current mesh line without violating the condition
+                # elsewhere
+                if (
+                    left_spacing
+                    <= outer_spacing * self.smooth * (self.smooth + 1)
+                    - right_spacing
+                ):
                     # adjustment to make left_spacing = smooth * right_spacing
                     adj = (left_spacing - (self.smooth * right_spacing)) / (
                         self.smooth + 1
@@ -452,6 +464,8 @@ class AutoMesh:
                         insort_left(
                             self.mesh_lines[dim], pos - (left_spacing / 2)
                         )
+                elif ratio <= self.smooth * (self.smooth + 1):
+                    insort_left(self.mesh_lines[dim], pos - (left_spacing / 2))
                 else:
                     insort_left(
                         self.mesh_lines[dim],
@@ -463,7 +477,19 @@ class AutoMesh:
                 and right_spacing - (self.smooth * left_spacing)
                 > self.smallest_res / 10
             ):
-                if right_spacing / left_spacing <= 2:
+                ratio = right_spacing / left_spacing
+                if i == 1:
+                    # TODO we can probably do better than this
+                    outer_spacing = left_spacing
+                else:
+                    outer_spacing = (
+                        pos - left_spacing - self.mesh_lines[dim][i - 2]
+                    )
+                if (
+                    right_spacing
+                    <= outer_spacing * self.smooth * (self.smooth + 1)
+                    - left_spacing
+                ):
                     adj = (right_spacing - (self.smooth * left_spacing)) / (
                         self.smooth + 1
                     )
@@ -476,6 +502,10 @@ class AutoMesh:
                         insort_left(
                             self.mesh_lines[dim], pos + (right_spacing / 2)
                         )
+                elif ratio <= self.smooth * (self.smooth + 1):
+                    insort_left(
+                        self.mesh_lines[dim], pos + (right_spacing / 2)
+                    )
                 else:
                     insort_left(
                         self.mesh_lines[dim],
