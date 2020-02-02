@@ -56,7 +56,9 @@ class AutoMesh:
         self.mres = mres * self.lmin
         self.sres = sres * self.lmin
         self.smooth = smooth
-        self.min_lines = min_lines
+        # mesh lines are added at both boundaries, which gives us an
+        # extra mesh line
+        self.min_lines = min_lines - 1
         # list of 6 elements corresponding to
         # [xmin, xmax, ymin, ymax, zmin, zmax]
         # each element gives the number of cells to add to the mesh
@@ -97,20 +99,29 @@ class AutoMesh:
         # appear to expose a way to remove individual lines.
         self.mesh_lines = [[], [], []]
 
-    def AutoGenMesh(self):
+    def AutoGenMesh(self, enforce_thirds=True, smooth=True):
         """
-        Start by assuming only two different mesh resolutions: metal and
-        substrate/air. This simplifies the 2/3 rule, where the distance to
-        the mesh is 1/3 on the metal side and 2/3 on the other side.
+        Start by assuming only two different mesh resolutions: metal
+        and substrate/air.  This simplifies the 2/3 rule, where the
+        distance to the mesh is 1/3 on the metal side and 2/3 on the
+        other side.
 
         Nonmetal primitives use a mesh resolution of lmin/10 and metal
-        primitives use a mesh resolution of lmin/20. There are two
+        primitives use a mesh resolution of lmin/20.  There are two
         exceptions to this: (1) if a dimension of a meterial has
         length 0 (e.g. a planar metal sheet) a single mesh line is
         placed exactly on that line, and (2) a nonzero length material
-        must have a minimum of 10 mesh lines . The 2nd exception will
+        must have a minimum of 10 mesh lines .  The 2nd exception will
         not violate the third's rule or smoothness (that adjacent mesh
         lines not differ in separation by more than a factor of 1.5).
+
+        :param enforce_thirds: Enforce thirds rule for metal
+            boundaries.  This should always be enabled unless you want
+            to debug the mesh generation.
+        :param smooth: Smooth mesh lines so that adjacent separations
+            do not differ by more than the smoothness factor.  This
+            should always be enabled unless you want to debug the mesh
+            generation.
         """
         # add metal mesh
         for prim in self.prims:
@@ -146,12 +157,14 @@ class AutoMesh:
             self._RemoveTightMeshLines(dim)
 
         # enforce thirds rule
-        for dim in range(3):
-            self._EnforceThirds(dim)
+        if enforce_thirds:
+            for dim in range(3):
+                self._EnforceThirds(dim)
 
         # smooth mesh
-        for dim in range(3):
-            self._SmoothMeshLines(dim)
+        if smooth:
+            for dim in range(3):
+                self._SmoothMeshLines(dim)
 
         # set calculated mesh lines
         self._AddAllMeshLines()
@@ -231,28 +244,31 @@ class AutoMesh:
                     spacing_right = self.mesh_lines[dim][i + 1] - pos
                     del self.mesh_lines[dim][i]
                     # metal-metal boundary
-                    if spacing_left == spacing_right:
-                        new_low = pos - (self.mres / 3)
-                        new_high = pos + (self.mres / 3)
-                        # no need to add new lines if we already have closer ones.
+                    if (
+                        abs(spacing_left - spacing_right)
+                        < self.smallest_res / 10
+                    ):
+                        new_low = pos - (spacing_left / 2)
+                        new_high = pos + (spacing_left / 2)
+                        # no need to add new lines if we already have
+                        # closer ones.
                         if new_low > pos - spacing_left:
                             insort_left(self.mesh_lines[dim], new_low)
                         if new_high < pos + spacing_right:
                             insort_left(self.mesh_lines[dim], new_high)
+                    # don't need to add tolerance for float comparison
+                    # since metal-metal boundary check already did
+                    # that
                     elif spacing_left < spacing_right:
-                        new_low = pos - (self.mres / 3)
-                        new_high = pos + (2 * self.mres / 3)
-                        if new_low > pos - spacing_left:
-                            insort_left(self.mesh_lines[dim], new_low)
-                        if new_high < pos + spacing_right:
-                            insort_left(self.mesh_lines[dim], new_high)
+                        new_low = pos - (spacing_left / 3)
+                        new_high = pos + (2 * spacing_left / 3)
+                        insort_left(self.mesh_lines[dim], new_low)
+                        insort_left(self.mesh_lines[dim], new_high)
                     else:
-                        new_low = pos - (2 * self.mres / 3)
-                        new_high = pos + (self.mres / 3)
-                        if new_low > pos - spacing_left:
-                            insort_left(self.mesh_lines[dim], new_low)
-                        if new_high < pos + spacing_right:
-                            insort_left(self.mesh_lines[dim], new_high)
+                        new_low = pos - (2 * spacing_right / 3)
+                        new_high = pos + (spacing_right / 3)
+                        insort_left(self.mesh_lines[dim], new_low)
+                        insort_left(self.mesh_lines[dim], new_high)
                     self._EnforceThirds(dim)
 
     def _RemoveTightMeshLines(self, dim):
@@ -270,9 +286,14 @@ class AutoMesh:
                 self._RemoveTightMeshLines(dim)
             # we have to check whether these are zero-dimension
             # structures before deleting them.
-            elif pos - last_pos < self.smallest_res and (
-                pos not in self.const_meshes[dim]
-                or last_pos not in self.const_meshes[dim]
+            elif (
+                pos - last_pos < self.smallest_res
+                and abs(pos - last_pos - self.smallest_res)
+                > self.smallest_res / 10
+                and (
+                    pos not in self.const_meshes[dim]
+                    or last_pos not in self.const_meshes[dim]
+                )
             ):
                 if last_pos not in self.const_meshes[dim]:
                     del self.mesh_lines[dim][i - 1]
@@ -392,6 +413,18 @@ class AutoMesh:
         self._ConsolidateMeshedRanges(dim)
 
     def _SmoothMeshLines(self, dim):
+        """
+        Ensure adjacent mesh line separations differ by less than the
+        smoothness factor.
+
+        If there's enough room between mesh lines, this function will
+        recursively add mesh lines corresponding to the largest
+        possible separation in line with self.smooth.  When there's
+        not enough room, it moves the position of existing lines to be
+        in line with smooth.
+
+        :param dim: Dimension where mesh should be smoothed.
+        """
         for i, pos in enumerate(self.mesh_lines[dim]):
             if i == 0 or i == len(self.mesh_lines[dim]) - 1:
                 continue
@@ -400,9 +433,13 @@ class AutoMesh:
             if (
                 left_spacing > (self.smooth * right_spacing)
                 and left_spacing - (self.smooth * right_spacing)
-                > right_spacing / 10
+                > self.smallest_res / 10
             ):
+                # only add lines if it makes the mesh smoother. If the
+                # separations differ by less than a factor of 2,
+                # adding a line will make surrounding mesh less smooth
                 if left_spacing / right_spacing <= 2:
+                    # adjustment to make left_spacing = smooth * right_spacing
                     adj = (left_spacing - (self.smooth * right_spacing)) / (
                         self.smooth + 1
                     )
@@ -416,12 +453,15 @@ class AutoMesh:
                             self.mesh_lines[dim], pos - (left_spacing / 2)
                         )
                 else:
-                    insort_left(self.mesh_lines[dim], pos - (left_spacing / 2))
+                    insort_left(
+                        self.mesh_lines[dim],
+                        pos - (self.smooth * right_spacing),
+                    )
                 self._SmoothMeshLines(dim)
             elif (
                 right_spacing > self.smooth * left_spacing
                 and right_spacing - (self.smooth * left_spacing)
-                > left_spacing / 10
+                > self.smallest_res / 10
             ):
                 if right_spacing / left_spacing <= 2:
                     adj = (right_spacing - (self.smooth * left_spacing)) / (
@@ -438,7 +478,8 @@ class AutoMesh:
                         )
                 else:
                     insort_left(
-                        self.mesh_lines[dim], pos + (right_spacing / 2)
+                        self.mesh_lines[dim],
+                        pos + (self.smooth * left_spacing),
                     )
                 self._SmoothMeshLines(dim)
 
@@ -455,14 +496,25 @@ class AutoMesh:
         return (upper - lower) / num_divisions
 
     def _GenMeshInBounds(self, lower, upper, res, dim, metal=False):
+        """
+        Add mesh lines within the provided dimensional boundaries.
+
+        :param lower: Lower dimensional boundary.
+        :param upper: Upper dimensional boundary.
+        :param res: Desired mesh resolution within the provided
+            boundary.
+        :param dim: Dimension.  0, 1, or 2.
+        :param metal: Set to True if this boundary corresponds to a
+            metal structure.
+        """
         if lower == upper:
             insort_left(self.mesh_lines[dim], lower)
             insort_left(self.const_meshes[dim], lower)
         else:
             [outer_bounds, inner_bounds] = self._SplitBounds(lower, upper, dim)
             for obound in outer_bounds:
-                if upper - lower < self.min_lines * res:
-                    res = (upper - lower) / self.min_lines
+                if obound[1] - obound[0] < self.min_lines * res:
+                    res = (obound[1] - obound[0]) / self.min_lines
                 else:
                     res = self._NearestDivisibleRes(obound[0], obound[1], res)
                 self.smallest_res = min(self.smallest_res, res)
@@ -902,7 +954,7 @@ class Microstrip:
             sres=1 / 10,
             smooth=1.4,
             unit=unit,
-            min_lines=10,
+            min_lines=7,
             expand_bounds=[0, 0, 10, 10, 0, 10],
         )
         auto_mesh.AutoGenMesh()
