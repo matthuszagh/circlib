@@ -12,7 +12,7 @@ from libcircuit.spice import capacitor_equiv, resistor_equiv
 
 class Type1PhaseDetectorDigital(BaseCircuit):
     """
-    Type-I phase detector circuit.
+    Type-I digital phase detector circuit.
     """
 
     def __init__(self, vdd=3.3, rval=1e2, cval=1e-9):
@@ -24,7 +24,7 @@ class Type1PhaseDetectorDigital(BaseCircuit):
     def cad(self) -> Subcircuit:
         """
         """
-        raise ValueError("Cad not yet implemented.")
+        raise NotImplementedError("Cad not yet implemented.")
 
     @subcircuit
     def spice(self, use_parasitics: bool = True) -> Subcircuit:
@@ -95,3 +95,172 @@ class Type1PhaseDetectorDigital(BaseCircuit):
         self.xor["out"] += self.dac["dig_in"][0]
         self.dac["anlg_out"][0] += self.r[1]
         self.r[2] += self.c[1]
+
+
+class Type2PhaseDetector(BaseCircuit):
+    """
+    Type 2 phase detector circuit.  This only works with digital
+    signals.
+    """
+
+    def __init__(self, vdd=3.3):
+        """
+        """
+        self.vdd = vdd
+        self.pins = None
+
+    def _assign_pins(self):
+        self.pins = {
+            "fref": self.adc["in"][0],
+            "fvco": self.adc["in"][1],
+            "vout": self.limit["out"],
+            "vcc": self.isourcet["op"],
+            "gnd": self.c["n"],
+        }
+
+    def __getitem__(self, key):
+        return self.pins[key]
+
+    def __setitem__(self, key, value):
+        self.pins[key] = value
+
+    @subcircuit
+    def cad(self) -> Subcircuit:
+        """
+        """
+        raise NotImplementedError("Cad not yet implemented.")
+
+    @subcircuit
+    def spice(self):
+        """
+        :returns: [fref, fvco, vout, vcc, gnd]
+        """
+        self.vp = Part("pyspice", "V", value=self.vdd)
+
+        dff_model = XspiceModel(
+            "dff",
+            "d_dff",
+            clk_delay=1e-12,
+            set_delay=1e-12,
+            reset_delay=1e-12,
+            ic=0,
+            data_load=1e-12,
+            clk_load=1e-12,
+            set_load=1e-12,
+            reset_load=1e-12,
+            rise_delay=1e-12,
+            fall_delay=1e-12,
+        )
+        inv_model = XspiceModel(
+            "inverter",
+            "d_inverter",
+            rise_delay=2e-9,
+            fall_delay=2e-9,
+            input_load=1e-12,
+        )
+
+        self.dt = Part(
+            "pyspice",
+            "A",
+            io=["d", "clk", "null", "rst", "q", "null"],
+            model=dff_model,
+        )
+        self.db = Part(
+            "pyspice",
+            "A",
+            io=["d", "clk", "null", "rst", "q", "null"],
+            model=dff_model,
+        )
+        self.inv1 = Part("pyspice", "A", io=["in", "out"], model=inv_model)
+        self.inv2 = Part("pyspice", "A", io=["in", "out"], model=inv_model)
+        self.and_gate = Part(
+            "pyspice",
+            "A",
+            io=["in[]", "out"],
+            model=XspiceModel(
+                "and",
+                "d_and",
+                rise_delay=1e-12,
+                fall_delay=1e-12,
+                input_load=1e-12,
+            ),
+        )
+        self.isourcet = Part("pyspice", "G", current_gain=3e-3)
+        self.isourceb = Part("pyspice", "G", current_gain=3e-3)
+        self.limit = Part(
+            "pyspice",
+            "A",
+            io=["in", "out"],
+            model=XspiceModel(
+                "limiter",
+                "limit",
+                in_offset=0,
+                gain=1,
+                out_lower_limit=0,
+                out_upper_limit=1,
+            ),
+        )
+        self.c = Part("pyspice", "C", value=1e-9)
+        self.r = Part("pyspice", "R", value=1e6)
+
+        self.adc = Part(
+            "pyspice",
+            "A",
+            io=["in[]", "out[]"],
+            model=XspiceModel(
+                "adc",
+                "adc_bridge",
+                in_low=self.vdd / 3,
+                in_high=2 * self.vdd / 3,
+                rise_delay=1e-12,
+                fall_delay=1e-12,
+            ),
+        )
+        self.dac = Part(
+            "pyspice",
+            "A",
+            io=["in[]", "out[]"],
+            model=XspiceModel(
+                "dac",
+                "dac_bridge",
+                out_low=0,
+                out_high=self.vdd,
+                out_undef=self.vdd / 2,
+                input_load=1e-12,
+                t_rise=1e-12,
+                t_fall=1e-12,
+            ),
+        )
+
+        self._connect_components()
+        self._assign_pins()
+
+    def _connect_components(self):
+        """
+        """
+        # ground net
+        self.isourcet["in"] += (
+            self.isourceb["on"],
+            self.isourceb["in"],
+            self.c["n"],
+            self.vp["n"],
+            self.r["n"],
+        )
+
+        self.dt["rst"] += self.db["rst"], self.inv2["out"]
+        self.inv1["out"] += self.inv2["in"]
+        self.inv1["in"] += self.and_gate["out"]
+        self.dt["q"] += self.and_gate["in"][0], self.dac["in"][0]
+        self.db["q"] += self.and_gate["in"][1], self.dac["in"][1]
+        self.dac["out"][0] += self.isourcet["ip"]
+        self.dac["out"][1] += self.isourceb["ip"]
+        self.isourcet["on"] += (
+            self.isourceb["op"],
+            self.limit["in"],
+            self.c["p"],
+            self.r["p"],
+        )
+        self.adc["out"][0] += self.dt["clk"]
+        self.adc["out"][1] += self.db["clk"]
+        self.vp["p"] += self.adc["in"][2]
+        self.adc["out"][2] += self.dt["d"], self.db["d"]
