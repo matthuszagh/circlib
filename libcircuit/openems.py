@@ -15,12 +15,13 @@ import numpy as np
 
 class AutoMesh:
     """
-    Automatic mesh generation for OpenEMS CSX structures.
+    Automatic mesh generation for OpenEMS CSX structures.  Probes
+    should always be defined after mesh generation.  Additionally,
+    voltage probes should be placed on a mesh line and current probes
+    should be placed midway between two adjacent mesh lines.
 
-    TODO check and correct if probes in PML.
-    TODO ensure at least one mesh line at intersection of metal and probe.
-    TODO mesh is subtly wrong (e.g. asymmetrical for cases where it should be
-    symmetrical).
+    TODO mesh is subtly wrong (e.g. asymmetrical for cases where it
+    should be symmetrical).
     """
 
     def __init__(
@@ -113,7 +114,7 @@ class AutoMesh:
         """
         # add metal mesh
         for prim in self.prims:
-            if self._PrimMetalp(prim):
+            if self._type_str(prim) == "Metal":
                 bounds = self._GetPrimBounds(prim)
                 for i in range(3):
                     self._GenMeshInBounds(
@@ -122,7 +123,7 @@ class AutoMesh:
 
         # add substrate mesh
         for prim in self.prims:
-            if not self._PrimMetalp(prim):
+            if self._type_str(prim) == "Material":
                 bounds = self._GetPrimBounds(prim)
                 for i in range(3):
                     self._GenMeshInBounds(
@@ -289,8 +290,11 @@ class AutoMesh:
     def _GetMesh(self):
         return self.mesh
 
-    def _PrimMetalp(self, prim):
-        return prim.GetProperty().GetTypeString() == "Metal"
+    def _type_str(self, prim):
+        return prim.GetProperty().GetTypeString()
+
+    # def _PrimMetalp(self, prim):
+    #     return prim.GetProperty().GetTypeString() == "Metal"
 
     def _GetPrimBounds(self, prim):
         orig_bounds = prim.GetBoundBox()
@@ -676,6 +680,38 @@ def wheeler_z0_width(
     return width
 
 
+class Probe:
+    """
+    Wrapper class for openems probes.  The main additional feature is
+    this class holds onto data.
+    """
+
+    def __init__(
+        self, name: str, csx: csxcad.ContinuousStructure(), box, p_type=0,
+    ):
+        """
+        :param name: probe name, which becomes filename where data is
+            stored.
+        :param csx: csx structure to add probe to.
+        :param box: 2D list, outer dim=2, inner dim=3.  Outer
+            dimensions is start and stop of box, and inner dimension
+            are the x, y, and z coordinates, respectively.
+        :param p_type: 0 if voltage probe, 1 if current probe.
+        """
+        self.data = None
+        self.f_data = None
+        self.box = box
+        self.csx = csx
+        self.name = name
+        self.p_type = p_type
+        self.csxProbe = self.csx.AddProbe(self.name, self.p_type)
+        self.csxProbe.AddBox(start=self.box[0], stop=self.box[1])
+
+    def calc_frequency_data(self, sim_path, freq, signal_type="pulse"):
+        self.data = UI_data([self.name], sim_path, freq, signal_type)
+        self.f_data = self.data.ui_f_val[0]
+
+
 class Microstrip:
     """
     Microstrip transmission line.
@@ -751,12 +787,12 @@ class Microstrip:
             os.mkdir(self.fvtr_dir)
 
         self.csx = None
-        # track whether simulation already performed so that we only
-        # need to simulate once
+        self.vprobes = [None]
+        self.iprobes = [None]
+        # track simulation steps so that we don't reperform steps
         self.sim_done = False
         self.csx_done = False
         self.freq_bins = None
-        self.calc_ports = None
         self.fdtd = None
 
     def sim(
@@ -781,8 +817,17 @@ class Microstrip:
             self.f0 - self.fc, self.f0 + self.fc, num_freq_bins
         )
 
-        self.ReadUIData(sim_path=tmpdir, freq=self.freq_bins)
+        for i, _ in enumerate(self.vprobes):
+            self.vprobes[i].calc_frequency_data(
+                sim_path=tmpdir, freq=self.freq_bins
+            )
 
+        for i, _ in enumerate(self.iprobes):
+            self.iprobes[i].calc_frequency_data(
+                sim_path=tmpdir, freq=self.freq_bins
+            )
+
+        self.calc_params()
         self.sim_done = True
         return np.absolute(self.Z_ref)
 
@@ -857,46 +902,12 @@ class Microstrip:
             sres=1 / 10,
             smooth=1.4,
             unit=unit,
-            min_lines=5,
+            min_lines=10,
             expand_bounds=[0, 0, 10, 10, 0, 10],
         )
         auto_mesh.AutoGenMesh()
 
-        csx_grid = self.csx.GetGrid()
-        num_lines = csx_grid.GetQtyLines(0)
-        mid_idx = int(num_lines / 2)
-        vprobe_x_pos = [
-            csx_grid.GetLine(0, mid_idx - 1),
-            csx_grid.GetLine(0, mid_idx),
-            csx_grid.GetLine(0, mid_idx + 1),
-        ]
-        self.U_delta = np.diff(vprobe_x_pos)
-        iprobe_x_pos = [
-            (vprobe_x_pos[0] + vprobe_x_pos[1]) / 2,
-            (vprobe_x_pos[1] + vprobe_x_pos[2]) / 2,
-        ]
-        self.I_delta = np.diff(iprobe_x_pos)
-
-        vprobe = [None for i in range(len(vprobe_x_pos))]
-        iprobe = [None for i in range(len(iprobe_x_pos))]
-
-        for i, _ in enumerate(vprobe):
-            vprobe[i] = self.csx.AddProbe("ut_" + str(i), 0)
-            vprobe[i].AddBox(
-                start=[vprobe_x_pos[i], 0, -self.pcb.layer_sep[0]],
-                stop=[vprobe_x_pos[i], 0, 0],
-            )
-
-        for i, _ in enumerate(iprobe):
-            iprobe[i] = self.csx.AddProbe("it_" + str(i), 1, norm_dir=0)
-            iprobe[i].AddBox(
-                start=[iprobe_x_pos[i], -self.microstrip_width / 2, 0],
-                stop=[
-                    iprobe_x_pos[i],
-                    self.microstrip_width / 2,
-                    trace_height,
-                ],
-            )
+        self.gen_probes(trace_height=trace_height)
 
         # E-field recording
         if self.efield:
@@ -919,29 +930,58 @@ class Microstrip:
         self.csx.Write2XML(self.fcsx)
         self.csx_done = True
 
-    def ReadUIData(self, sim_path, freq, signal_type="pulse"):
-        U_filenames = ["ut_" + str(i) for i in range(3)]
-        I_filenames = ["it_" + str(i) for i in range(2)]
+    def gen_probes(self, trace_height):
+        csx_grid = self.csx.GetGrid()
+        mid_idx = int(csx_grid.GetQtyLines(0) / 2)
+        vprobe_x_pos = [
+            csx_grid.GetLine(0, mid_idx - 1),
+            csx_grid.GetLine(0, mid_idx),
+            csx_grid.GetLine(0, mid_idx + 1),
+        ]
+        iprobe_x_pos = [
+            (vprobe_x_pos[0] + vprobe_x_pos[1]) / 2,
+            (vprobe_x_pos[1] + vprobe_x_pos[2]) / 2,
+        ]
 
-        self.u_data = UI_data(U_filenames, sim_path, freq, signal_type)
-        self.uf_tot = self.u_data.ui_f_val[1]
+        self.vprobes = [None for i in range(len(vprobe_x_pos))]
+        self.iprobes = [None for i in range(len(iprobe_x_pos))]
 
-        self.i_data = UI_data(I_filenames, sim_path, freq, signal_type)
-        self.if_tot = 0.5 * (self.i_data.ui_f_val[0] + self.i_data.ui_f_val[1])
+        for i, _ in enumerate(self.vprobes):
+            self.vprobes[i] = Probe(
+                name="ut_" + str(i),
+                csx=self.csx,
+                box=[
+                    [vprobe_x_pos[i], 0, -self.pcb.layer_sep[0]],
+                    [vprobe_x_pos[i], 0, 0],
+                ],
+                p_type=0,
+            )
 
-        unit = self.csx.GetGrid().GetDeltaUnit()
-        print(unit)
-        Et = self.u_data.ui_f_val[1]
-        dEt = (self.u_data.ui_f_val[2] - self.u_data.ui_f_val[0]) / (
-            np.sum(np.abs(self.U_delta)) * unit
+        for i, _ in enumerate(self.iprobes):
+            self.iprobes[i] = Probe(
+                name="it_" + str(i),
+                csx=self.csx,
+                box=[
+                    [iprobe_x_pos[i], -self.microstrip_width / 2, 0],
+                    [
+                        iprobe_x_pos[i],
+                        self.microstrip_width / 2,
+                        trace_height,
+                    ],
+                ],
+                p_type=1,
+            )
+
+    def calc_params(self):
+        Et = self.vprobes[1].f_data
+        Ht = 0.5 * (self.iprobes[0].f_data + self.iprobes[1].f_data)
+        unit = 1e-3
+        dEt = (self.vprobes[2].f_data - self.vprobes[0].f_data) / (
+            unit * (self.vprobes[2].box[0][0] - self.vprobes[0].box[0][0])
         )
-        Ht = (
-            self.if_tot
-        )  # space averaging: Ht is now defined at the same pos as Et
-        dHt = (self.i_data.ui_f_val[1] - self.i_data.ui_f_val[0]) / (
-            np.abs(self.I_delta[0]) * unit
+        dHt = (self.iprobes[1].f_data - self.iprobes[0].f_data) / (
+            unit * (self.iprobes[1].box[0][0] - self.iprobes[0].box[0][0])
         )
-
         beta = np.sqrt(-dEt * dHt / (Ht * Et))
         beta[
             np.real(beta) < 0
@@ -1038,7 +1078,7 @@ def microstrip_sweep_width(
             pcb=pcb, f0=f0, fc=fc, z0_ref=z0_ref, microstrip_width=width
         )
 
-    pool = Pool()
+    pool = Pool(nodes=15)
     freq_bins = 501
     func = partial(
         Microstrip.sim, num_freq_bins=freq_bins, zero_trace_height=False,
