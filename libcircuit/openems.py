@@ -423,6 +423,9 @@ class AutoMesh:
         not enough room, it moves the position of existing lines to be
         in line with smooth.
 
+        TODO should be refactored since logic in if branches are
+        basically identical, but switched.
+
         :param dim: Dimension where mesh should be smoothed.
         """
         for i, pos in enumerate(self.mesh_lines[dim]):
@@ -989,19 +992,6 @@ class Microstrip:
         self.fdtd.SetBoundaryCond(
             ["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"]
         )
-        self.fdtd.AddLumpedPort(
-            port_nr=0,
-            R=self.z0_ref,
-            start=[
-                -self.microstrip_len / 4,
-                -self.microstrip_width / 2,
-                -self.pcb.layer_sep[0],
-            ],
-            stop=[-self.microstrip_len / 4, self.microstrip_width / 2, 0],
-            p_dir="z",
-            excite=1,
-            priority=999,
-        )
 
         auto_mesh = AutoMesh(
             self.csx,
@@ -1010,10 +1000,27 @@ class Microstrip:
             sres=1 / 10,
             smooth=1.4,
             unit=unit,
-            min_lines=7,
+            min_lines=9,
             expand_bounds=[0, 0, 10, 10, 0, 10],
         )
         auto_mesh.AutoGenMesh()
+
+        csx_grid = self.csx.GetGrid()
+        port_idx = csx_grid.GetQtyLines(0) / 4
+        port_xpos = csx_grid.GetLine(0, port_idx)
+        self.fdtd.AddLumpedPort(
+            port_nr=0,
+            R=self.z0_ref,
+            start=[
+                port_xpos,
+                -self.microstrip_width / 2,
+                -self.pcb.layer_sep[0],
+            ],
+            stop=[port_xpos, self.microstrip_width / 2, 0],
+            p_dir="z",
+            excite=1,
+            priority=999,
+        )
 
         self.gen_probes(trace_height=trace_height)
 
