@@ -13,6 +13,7 @@ let
   ] ++ (with custompkgs; [
     libcircuit
     skidl
+    automesh
   ]));
   kicad = pkgs.kicad;
 in
