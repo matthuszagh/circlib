@@ -169,6 +169,31 @@ class Mesh:
         # set calculated mesh lines
         self._add_lines_to_mesh()
 
+    def nearest_mesh_line(self, dim: int, pos: float) -> (int, float):
+        """
+        Find the nearest mesh line to a desired position for a given
+        dimension.
+
+        :param dim: 0, 1, or 2 for x, y, z.
+        :param pos: desired position.
+
+        :returns: (index, position) where index is the array index and
+                  position is the actual dimension value.
+        """
+        lines = self.mesh_lines[dim]
+        bisect_pos = bisect_left(self.mesh_lines[dim], pos)
+        if bisect_pos == 0:
+            return (0, lines[0])
+        elif bisect_pos == len(lines):
+            return (bisect_pos - 1, lines[bisect_pos - 1])
+        else:
+            lower = lines[bisect_pos - 1]
+            upper = lines[bisect_pos]
+            if pos - lower < upper - pos:
+                return (bisect_pos - 1, lower)
+            else:
+                return (bisect_pos, upper)
+
     # def ExpandMeshForBoundary(self):
     #     """
     #     Add cells for each boundary where PML is used. The mesh must
