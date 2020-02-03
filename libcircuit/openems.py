@@ -437,15 +437,38 @@ class AutoMesh:
             ):
                 ratio = left_spacing / right_spacing
                 if i == len(self.mesh_lines[dim]) - 2:
-                    # TODO we can probably do better than this
-                    outer_spacing = right_spacing
+                    # if there's no further mesh spacings to worry
+                    # about, this ensures we'll only move the mesh
+                    # line when that will satisfy smoothness
+                    outer_spacing = right_spacing + (
+                        1 / (self.smooth * (self.smooth + 1))
+                    )
                 else:
                     outer_spacing = self.mesh_lines[dim][i + 2] - (
                         pos + right_spacing
                     )
                 # if this condition satisfied, then we can move the
-                # current mesh line without violating the condition
-                # elsewhere
+                # current mesh line without violating smoothness
+                # elsewhere. To see how I got this condition, imagine
+                # spacings are given by a, b and c in order. Spacings
+                # on either side of current position are a and b. s
+                # gives smooth factor. Move pos by dx to have a and b
+                # satisfy s. It's currently above, so move by just
+                # enough to satisfy.
+                #
+                # (a-dx)/(b+dx) = s
+                #
+                # simultaneously,
+                #
+                # (b+dx)/c <= s
+                #
+                # we need the max a where this works. This occurs at
+                #
+                # (b+dx)/c = s
+                #
+                # find a. sagemath tells you that
+                #
+                # a = cs^2 + cs - b
                 if (
                     left_spacing
                     <= outer_spacing * self.smooth * (self.smooth + 1)
@@ -464,6 +487,8 @@ class AutoMesh:
                         insort_left(
                             self.mesh_lines[dim], pos - (left_spacing / 2)
                         )
+                # mesh separation is too small to add smooth *
+                # spacing, so instead add it halfway
                 elif ratio <= self.smooth * (self.smooth + 1):
                     insort_left(self.mesh_lines[dim], pos - (left_spacing / 2))
                 else:
@@ -479,8 +504,9 @@ class AutoMesh:
             ):
                 ratio = right_spacing / left_spacing
                 if i == 1:
-                    # TODO we can probably do better than this
-                    outer_spacing = left_spacing
+                    outer_spacing = left_spacing + (
+                        1 / (self.smooth * (self.smooth + 1))
+                    )
                 else:
                     outer_spacing = (
                         pos - left_spacing - self.mesh_lines[dim][i - 2]
@@ -1160,7 +1186,7 @@ def microstrip_sweep_width(
             pcb=pcb, f0=f0, fc=fc, z0_ref=z0_ref, microstrip_width=width
         )
 
-    pool = Pool(nodes=15)
+    pool = Pool(nodes=11)
     freq_bins = 501
     func = partial(
         Microstrip.sim, num_freq_bins=freq_bins, zero_trace_height=False,
