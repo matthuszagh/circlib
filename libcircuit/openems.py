@@ -940,6 +940,7 @@ class Microstrip:
                 rmtree(self.fvtr_dir)
             os.mkdir(self.fvtr_dir)
 
+        self.mesh = None
         self.csx = None
         self.vprobes = [None]
         self.iprobes = [None]
@@ -1036,7 +1037,7 @@ class Microstrip:
             ["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"]
         )
 
-        auto_mesh = Mesh(
+        self.mesh = Mesh(
             self.csx,
             lmin,
             mres=1 / 20,
@@ -1046,11 +1047,9 @@ class Microstrip:
             min_lines=9,
             expand_bounds=[0, 0, 10, 10, 0, 10],
         )
-        auto_mesh.generate_mesh()
+        self.mesh.generate_mesh()
 
-        csx_grid = self.csx.GetGrid()
-        port_idx = csx_grid.GetQtyLines(0) / 4
-        port_xpos = csx_grid.GetLine(0, port_idx)
+        _, port_xpos = self.mesh.nearest_mesh_line(0, -self.microstrip_len / 4)
         self.fdtd.AddLumpedPort(
             port_nr=0,
             R=self.z0_ref,
@@ -1089,12 +1088,11 @@ class Microstrip:
         self.csx_done = True
 
     def gen_probes(self, trace_height):
-        csx_grid = self.csx.GetGrid()
-        mid_idx = int(csx_grid.GetQtyLines(0) / 2)
+        mid_idx, mid_xpos = self.mesh.nearest_mesh_line(0, 0)
         vprobe_x_pos = [
-            csx_grid.GetLine(0, mid_idx - 1),
-            csx_grid.GetLine(0, mid_idx),
-            csx_grid.GetLine(0, mid_idx + 1),
+            self.mesh.mesh_lines[0][mid_idx - 1],
+            mid_xpos,
+            self.mesh.mesh_lines[0][mid_idx + 1],
         ]
         iprobe_x_pos = [
             (vprobe_x_pos[0] + vprobe_x_pos[1]) / 2,
