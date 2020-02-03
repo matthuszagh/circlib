@@ -13,7 +13,7 @@ from openEMS.ports import UI_data
 import numpy as np
 
 
-class AutoMesh:
+class Mesh:
     """
     Automatic mesh generation for OpenEMS CSX structures.  Probes
     should always be defined after mesh generation.  Additionally,
@@ -99,7 +99,7 @@ class AutoMesh:
         # appear to expose a way to remove individual lines.
         self.mesh_lines = [[], [], []]
 
-    def AutoGenMesh(self, enforce_thirds=True, smooth=True):
+    def generate_mesh(self, enforce_thirds=True, smooth=True):
         """
         Start by assuming only two different mesh resolutions: metal
         and substrate/air.  This simplifies the 2/3 rule, where the
@@ -126,24 +126,24 @@ class AutoMesh:
         # add metal mesh
         for prim in self.prims:
             if self._type_str(prim) == "Metal":
-                bounds = self._GetPrimBounds(prim)
+                bounds = self._get_prim_bounds(prim)
                 for i in range(3):
-                    self._GenMeshInBounds(
+                    self._gen_mesh_in_bounds(
                         bounds[i][0], bounds[i][1], self.mres, i, metal=True
                     )
 
         # add substrate mesh
         for prim in self.prims:
             if self._type_str(prim) == "Material":
-                bounds = self._GetPrimBounds(prim)
+                bounds = self._get_prim_bounds(prim)
                 for i in range(3):
-                    self._GenMeshInBounds(
+                    self._gen_mesh_in_bounds(
                         bounds[i][0], bounds[i][1], self.sres, i, metal=False
                     )
 
         # add simulation box mesh
         for i in range(3):
-            self._GenMeshInBounds(
+            self._gen_mesh_in_bounds(
                 self.mesh_lines[i][0]
                 - (self.sres * self.expand_bounds[2 * i]),
                 self.mesh_lines[i][-1]
@@ -154,20 +154,20 @@ class AutoMesh:
             )
         # remove unintended, tightly spaced meshes
         for dim in range(3):
-            self._RemoveTightMeshLines(dim)
+            self._remove_tight_mesh_lines(dim)
 
         # enforce thirds rule
         if enforce_thirds:
             for dim in range(3):
-                self._EnforceThirds(dim)
+                self._enforce_thirds(dim)
 
         # smooth mesh
         if smooth:
             for dim in range(3):
-                self._SmoothMeshLines(dim)
+                self._smooth_mesh_lines(dim)
 
         # set calculated mesh lines
-        self._AddAllMeshLines()
+        self._add_lines_to_mesh()
 
     # def ExpandMeshForBoundary(self):
     #     """
@@ -223,7 +223,7 @@ class AutoMesh:
     #     return int(boundary / 2)
 
     # TODO should ensure that inserted mesh lines are not at metal boundaries
-    def _EnforceThirds(self, dim):
+    def _enforce_thirds(self, dim):
         """
         Replace mesh lines at metal boundaries with a mesh line
         1/3*res inside the metal boundary and 2/3*res outside.
@@ -240,12 +240,12 @@ class AutoMesh:
                 if i == 0:
                     del self.mesh_lines[dim][i]
                     insort_left(self.mesh_lines[dim], pos + (self.mres / 3))
-                    self._EnforceThirds(dim)
+                    self._enforce_thirds(dim)
                 # at upper boundary
                 elif i == len(self.mesh_lines[dim]) - 1:
                     del self.mesh_lines[dim][i]
                     insort_left(self.mesh_lines[dim], pos - (self.mres / 3))
-                    self._EnforceThirds(dim)
+                    self._enforce_thirds(dim)
                 else:
                     spacing_left = pos - self.mesh_lines[dim][i - 1]
                     spacing_right = self.mesh_lines[dim][i + 1] - pos
@@ -269,9 +269,9 @@ class AutoMesh:
 
                     insort_left(self.mesh_lines[dim], new_low)
                     insort_left(self.mesh_lines[dim], new_high)
-                    self._EnforceThirds(dim)
+                    self._enforce_thirds(dim)
 
-    def _RemoveTightMeshLines(self, dim):
+    def _remove_tight_mesh_lines(self, dim):
         """
         Remove adjacent mesh lines for dimension @dim with spacing
         less than the smallest valid resolution.
@@ -286,7 +286,7 @@ class AutoMesh:
             # we can freely delete duplicates
             if pos == last_pos:
                 del self.mesh_lines[dim][i]
-                self._RemoveTightMeshLines(dim)
+                self._remove_tight_mesh_lines(dim)
             # we have to check whether these are zero-dimension
             # structures before deleting them.
             elif (
@@ -302,22 +302,25 @@ class AutoMesh:
                     del self.mesh_lines[dim][i - 1]
                 else:
                     del self.mesh_lines[dim][i]
-                self._RemoveTightMeshLines(dim)
+                self._remove_tight_mesh_lines(dim)
             else:
                 last_pos = pos
 
-    def _AddAllMeshLines(self):
+    def _add_lines_to_mesh(self):
+        """
+        Generates the actual CSX mesh structure from lines.
+        """
         for dim in range(3):
             for line in self.mesh_lines[dim]:
                 self.mesh.AddLine(dim, line)
 
-    def _GetMesh(self):
+    def _get_mesh(self):
         return self.mesh
 
     def _type_str(self, prim):
         return prim.GetProperty().GetTypeString()
 
-    def _GetPrimBounds(self, prim):
+    def _get_prim_bounds(self, prim):
         orig_bounds = prim.GetBoundBox()
         bounds = [[None, None], [None, None], [None, None]]
         for i in range(3):
@@ -326,7 +329,14 @@ class AutoMesh:
             bounds[i] = [lower, upper]
         return bounds
 
-    def _MeshResInBounds(self, lower, upper, dim):
+    def _mesh_res_in_bounds(self, lower, upper, dim):
+        """
+        Get the mesh resolution in the supplied boundary.
+
+        :param lower: lower boundary.
+        :param upper: upper boundary.
+        :param dim: Dimension. 0, 1, or 2 for x, y, or z.
+        """
         lower_idx = bisect_left(self.mesh_lines[dim], lower)
         upper_idx = min(
             bisect_left(self.mesh_lines[dim], upper) + 1,
@@ -339,7 +349,7 @@ class AutoMesh:
             last_pos = self.mesh_lines[dim][idx]
         return sum(spacing) / len(spacing)
 
-    def _SplitBounds(self, lower, upper, dim):
+    def _split_bounds(self, lower, upper, dim):
         """
         Split bounds delimited by [lower, upper] into regions where mesh
         already exists and regions where it doesn't yet exist.
@@ -382,12 +392,12 @@ class AutoMesh:
 
         return outin_ranges
 
-    def _ClearMeshInBounds(self, lower, upper, dim):
+    def _clear_mesh_in_bounds(self, lower, upper, dim):
         for elt in self.mesh_lines[dim]:
             if elt >= lower and elt <= upper:
                 self.mesh_lines[dim].remove(elt)
 
-    def _RangeUnion(self, ranges, start_idx=0):
+    def _range_union(self, ranges, start_idx=0):
         ranges = sorted(ranges)
         if len(ranges[start_idx:]) <= 1:
             return ranges
@@ -395,24 +405,24 @@ class AutoMesh:
         if ranges[start_idx][1] >= ranges[start_idx + 1][0]:
             ranges.append([ranges[start_idx][0], ranges[start_idx + 1][1]])
             del ranges[start_idx : start_idx + 2]
-            return self._RangeUnion(ranges[start_idx:])
+            return self._range_union(ranges[start_idx:])
         else:
-            return self._RangeUnion(ranges[start_idx + 1 :])
+            return self._range_union(ranges[start_idx + 1 :])
 
-    def _ConsolidateMeshedRanges(self, dim):
+    def _consolidate_meshed_ranges(self, dim):
         """
         Order meshed ranges and consolidate contiguous ranges.
         """
-        self.ranges_meshed[dim] = self._RangeUnion(self.ranges_meshed[dim])
+        self.ranges_meshed[dim] = self._range_union(self.ranges_meshed[dim])
 
-    def _UpdateRanges(self, lower, upper, dim):
+    def _update_ranges(self, lower, upper, dim):
         """
         :param dim: is the dimension: 0, 1, 2 for x, y, or z.
         """
         self.ranges_meshed[dim].append([lower, upper])
-        self._ConsolidateMeshedRanges(dim)
+        self._consolidate_meshed_ranges(dim)
 
-    def _SmoothMeshLines(self, dim):
+    def _smooth_mesh_lines(self, dim):
         """
         Ensure adjacent mesh line separations differ by less than the
         smoothness factor.
@@ -499,7 +509,7 @@ class AutoMesh:
                         self.mesh_lines[dim],
                         pos - (self.smooth * right_spacing),
                     )
-                self._SmoothMeshLines(dim)
+                self._smooth_mesh_lines(dim)
             elif (
                 right_spacing > self.smooth * left_spacing
                 and right_spacing - (self.smooth * left_spacing)
@@ -540,9 +550,9 @@ class AutoMesh:
                         self.mesh_lines[dim],
                         pos + (self.smooth * left_spacing),
                     )
-                self._SmoothMeshLines(dim)
+                self._smooth_mesh_lines(dim)
 
-    def _NearestDivisibleRes(self, lower, upper, res):
+    def _nearest_divisible_res(self, lower, upper, res):
         """
         Return the nearest resolution to @res that evenly subdivides the
         interval [@lower, @upper].
@@ -554,7 +564,7 @@ class AutoMesh:
         num_divisions = max(num_divisions, 1)
         return (upper - lower) / num_divisions
 
-    def _GenMeshInBounds(self, lower, upper, res, dim, metal=False):
+    def _gen_mesh_in_bounds(self, lower, upper, res, dim, metal=False):
         """
         Add mesh lines within the provided dimensional boundaries.
 
@@ -570,18 +580,22 @@ class AutoMesh:
             insort_left(self.mesh_lines[dim], lower)
             insort_left(self.const_meshes[dim], lower)
         else:
-            [outer_bounds, inner_bounds] = self._SplitBounds(lower, upper, dim)
+            [outer_bounds, inner_bounds] = self._split_bounds(
+                lower, upper, dim
+            )
             for obound in outer_bounds:
                 if obound[1] - obound[0] < self.min_lines * res:
                     res = (obound[1] - obound[0]) / self.min_lines
                 else:
-                    res = self._NearestDivisibleRes(obound[0], obound[1], res)
+                    res = self._nearest_divisible_res(
+                        obound[0], obound[1], res
+                    )
                 self.smallest_res = min(self.smallest_res, res)
                 j = obound[0]
                 while j <= obound[1]:
                     insort_left(self.mesh_lines[dim], j)
                     j += res
-                self._UpdateRanges(obound[0], obound[1], dim)
+                self._update_ranges(obound[0], obound[1], dim)
                 if metal:
                     insort_left(self.metal_bounds[dim], obound[0])
                     insort_left(self.metal_bounds[dim], obound[1])
@@ -589,18 +603,22 @@ class AutoMesh:
                 if upper - lower < self.min_lines * res:
                     res = (upper - lower) / self.min_lines
                 else:
-                    res = self._NearestDivisibleRes(ibound[0], ibound[1], res)
+                    res = self._nearest_divisible_res(
+                        ibound[0], ibound[1], res
+                    )
                 self.smallest_res = min(self.smallest_res, res)
                 # only redo the mesh if the desired one is finer than
                 # the existing one
-                cur_mesh_res = self._MeshResInBounds(ibound[0], ibound[1], dim)
+                cur_mesh_res = self._mesh_res_in_bounds(
+                    ibound[0], ibound[1], dim
+                )
                 if cur_mesh_res > res and abs(cur_mesh_res - res) > res / 10:
-                    self._ClearMeshInBounds(ibound[0], ibound[1], dim)
+                    self._clear_mesh_in_bounds(ibound[0], ibound[1], dim)
                     j = ibound[0]
                     while j <= ibound[1]:
                         insort_left(self.mesh_lines[dim], j)
                         j += res
-                    self._UpdateRanges(ibound[0], ibound[1], dim)
+                    self._update_ranges(ibound[0], ibound[1], dim)
                 if metal:
                     insort_left(self.metal_bounds[dim], ibound[0])
                     insort_left(self.metal_bounds[dim], ibound[1])
@@ -993,7 +1011,7 @@ class Microstrip:
             ["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"]
         )
 
-        auto_mesh = AutoMesh(
+        auto_mesh = Mesh(
             self.csx,
             lmin,
             mres=1 / 20,
@@ -1003,7 +1021,7 @@ class Microstrip:
             min_lines=9,
             expand_bounds=[0, 0, 10, 10, 0, 10],
         )
-        auto_mesh.AutoGenMesh()
+        auto_mesh.generate_mesh()
 
         csx_grid = self.csx.GetGrid()
         port_idx = csx_grid.GetQtyLines(0) / 4
