@@ -1,5 +1,5 @@
 from bisect import bisect_left
-from automesh import Mesh
+from automesh.mesh import Mesh
 from pathos.multiprocessing import ProcessingPool as Pool
 from functools import partial
 from subprocess import run
@@ -206,7 +206,12 @@ class Probe:
     """
 
     def __init__(
-        self, name: str, csx: csxcad.ContinuousStructure(), box, p_type=0,
+        self,
+        name: str,
+        csx: csxcad.ContinuousStructure(),
+        box,
+        p_type=0,
+        norm_dir: int = None,
     ):
         """
         :param name: probe name, which becomes filename where data is
@@ -216,6 +221,10 @@ class Probe:
             dimensions is start and stop of box, and inner dimension
             are the x, y, and z coordinates, respectively.
         :param p_type: 0 if voltage probe, 1 if current probe.
+        :param norm_dir: direction normal to a current probing box.
+            This only needs to be specified for a current probe if the
+            box only has one dimension.  Specify 0, 1, or 2 for x, y,
+            or z directions.
         """
         self.data = None
         self.f_data = None
@@ -223,7 +232,14 @@ class Probe:
         self.csx = csx
         self.name = name
         self.p_type = p_type
-        self.csxProbe = self.csx.AddProbe(self.name, self.p_type)
+        self.norm_dir = norm_dir
+        if self.norm_dir is not None:
+            self.norm_dir = int(self.norm_dir)
+            self.csxProbe = self.csx.AddProbe(
+                self.name, self.p_type, norm_dir=self.norm_dir
+            )
+        else:
+            self.csxProbe = self.csx.AddProbe(self.name, self.p_type)
         self.csxProbe.AddBox(start=self.box[0], stop=self.box[1])
 
     def calc_frequency_data(self, sim_path, freq, signal_type="pulse"):
@@ -305,6 +321,8 @@ class Microstrip:
                 rmtree(self.fvtr_dir)
             os.mkdir(self.fvtr_dir)
 
+        # all lengths in mm
+        self.unit = 1e-3
         self.mesh = None
         self.csx = None
         self.vprobes = [None]
@@ -349,7 +367,7 @@ class Microstrip:
 
         self.calc_params()
         self.sim_done = True
-        return np.absolute(self.Z_ref)
+        return np.absolute(self.z0)
 
     def gen_csx(self, zero_trace_height: bool = False) -> None:
         """
@@ -360,8 +378,7 @@ class Microstrip:
             accuracy.  Args: num_probes: zero_trace_height:
         """
         # dimensions and parameters
-        unit = 1e-3
-        lmin = C0 / ((self.f0 + self.fc) * unit)
+        lmin = C0 / ((self.f0 + self.fc) * self.unit)
         if zero_trace_height:
             trace_height = 0
         else:
@@ -369,7 +386,12 @@ class Microstrip:
 
         # structures
         self.csx = csxcad.ContinuousStructure()
-        microstrip = self.csx.AddMetal("PEC")
+        # microstrip = self.csx.AddMetal("PEC")
+        microstrip = self.csx.AddConductingSheet(
+            "Cu",
+            conductivity=5.8e7,
+            thickness=self.unit * self.pcb.layer_thickness[0],
+        )
         microstrip.AddBox(
             priority=10,
             start=[-self.microstrip_len / 2, -self.microstrip_width / 2, 0],
@@ -408,16 +430,26 @@ class Microstrip:
             mres=1 / 20,
             sres=1 / 10,
             smooth=1.4,
-            unit=unit,
+            unit=self.unit,
             min_lines=9,
             expand_bounds=[0, 0, 10, 10, 0, 10],
         )
         self.mesh.generate_mesh()
 
-        _, port_xpos = self.mesh.nearest_mesh_line(0, -self.microstrip_len / 4)
+        # port_xpos = self.mesh.mesh_lines[0][9]
+        _, port_xpos = self.mesh.nearest_mesh_line(
+            0, -3 * self.microstrip_len / 8
+        )
         self.fdtd.AddLumpedPort(
             port_nr=0,
-            R=self.z0_ref,
+            R=0,
+            # start=[
+            #     -self.microstrip_len / 2,
+            #     -self.microstrip_width / 2,
+            #     -self.pcb.layer_sep[0],
+            # ],
+            # stop=[-self.microstrip_len / 2, self.microstrip_width / 2, 0],
+            # R=self.z0_ref,
             start=[
                 port_xpos,
                 -self.microstrip_width / 2,
@@ -491,26 +523,45 @@ class Microstrip:
                     ],
                 ],
                 p_type=1,
+                norm_dir=0,
             )
 
     def calc_params(self):
-        Et = self.vprobes[1].f_data
-        Ht = 0.5 * (self.iprobes[0].f_data + self.iprobes[1].f_data)
-        unit = 1e-3
-        dEt = (self.vprobes[2].f_data - self.vprobes[0].f_data) / (
-            unit * (self.vprobes[2].box[0][0] - self.vprobes[0].box[0][0])
+        """
+        Calculate the transmission line characteristic impedance and
+        complex propagation constant.
+
+        Use tx line equations (see Pozar ch.2 for derivation):
+
+        ..  math:: dV/dz = -(R+jwL)I
+
+        ..  math:: dI/dz = -(G+jwC)V
+
+        ..  math:: Z0 = \sqrt{(R+jwL)/(G+jwC)}
+
+        ..  math:: \gamma = \sqrt{(R+jwL)(G+jwC)}
+
+        We have 3 voltage probes.  Take middle as V, and dV/dz from
+        1st to 3rd.  We have 2 current probes equidistant between the
+        voltage probes.  I is average of both and dI/dz is difference
+        from one to the other.
+        """
+        v = self.vprobes[1].f_data
+        i = 0.5 * (self.iprobes[0].f_data + self.iprobes[1].f_data)
+        dv = (self.vprobes[2].f_data - self.vprobes[0].f_data) / (
+            self.unit * (self.vprobes[2].box[0][0] - self.vprobes[0].box[0][0])
         )
-        dHt = (self.iprobes[1].f_data - self.iprobes[0].f_data) / (
-            unit * (self.iprobes[1].box[0][0] - self.iprobes[0].box[0][0])
+        di = (self.iprobes[1].f_data - self.iprobes[0].f_data) / (
+            self.unit * (self.iprobes[1].box[0][0] - self.iprobes[0].box[0][0])
         )
-        beta = np.sqrt(-dEt * dHt / (Ht * Et))
+        beta = np.sqrt(-dv * di / (i * v))
         beta[
             np.real(beta) < 0
         ] *= -1  # determine correct sign (unlike the paper)
         self.beta = beta
 
         # determine ZL
-        self.Z_ref = np.sqrt(Et * dEt / (Ht * dHt))
+        self.z0 = np.sqrt(v * dv / (i * di))
 
     def view_csx(self):
         """
@@ -553,6 +604,7 @@ def microstrip_sweep_width(
     width: float = None,
     width_dev_factor: float = 0.1,
     num_points: int = 11,
+    zero_trace_height: bool = False,
 ) -> List[Tuple[float, float]]:
     """
     Calculate microstrip characteristic impedance as a function of
@@ -602,10 +654,415 @@ def microstrip_sweep_width(
     pool = Pool(nodes=11)
     freq_bins = 501
     func = partial(
-        Microstrip.sim, num_freq_bins=freq_bins, zero_trace_height=False,
+        Microstrip.sim,
+        num_freq_bins=freq_bins,
+        zero_trace_height=zero_trace_height,
     )
     z0s = [None for i in range(num_points)]
     z0s = list(pool.map(func, microstrips))
+
+    ret_vals = [[None, None] for i in range(num_points)]
+    for i, _ in enumerate(z0s):
+        f0_bin_idx = int(freq_bins / 2)
+        z0 = z0s[i]
+        ret_vals[i][0] = widths[i]
+        ret_vals[i][1] = z0[f0_bin_idx]
+
+    return ret_vals
+
+
+class GCPW:
+    """
+    Grounded coplanar waveguide.
+    """
+
+    def __init__(
+        self,
+        pcb: PCB,
+        f0: float,
+        fc: float,
+        z0_ref: float = 50,
+        width: float = None,
+        gap: float = None,
+        length: float = 100,
+        substrate_width: float = 20,
+        fcsx: str = None,
+        fvtr_dir: str = None,
+        efield: bool = False,
+    ):
+        """
+        :param pcb: PCB object
+        :param f0: center frequency (Hz)
+        :param fc: corner frequency, given as difference from f0 (Hz)
+        :param z0_ref: desired impedance (ohm)
+        :param width: trace width (mm).
+        :param length: trace length (mm).  This value isn't critical
+            but does need to be large enough for the openems
+            simulation to work.  If unsure, stick with the default.
+        :param substrate_width: substrate width (mm)
+        :param substrate_len: substrate length (mm).  Must be at least
+            as large as the microstrip length.  If unsure, use the
+            default.
+        :param fcsx: CSX file name to write CSXCAD structure to.  If
+            ommitted, do not save the file.  Omitting this does not
+            prevent you from viewing the CSX structure, just from
+            saving it for later.  Relative to current directory.
+        :param fvtr_dir: directory for VTR E-field dump files.  Files
+            will be prefixed with 'Et_'.  If ommitted, E-field can
+            still be viewed unless `efield` is set to false in which
+            case this parameter has no effect.
+        :param efield: dump E-field time values for viewing.
+        """
+        self.pcb = pcb
+        self.f0 = f0
+        self.fc = fc
+        self.z0_ref = z0_ref
+        if width is None:
+            raise ValueError("must provide a trace width")
+        self.width = width
+        if gap is None:
+            raise ValueError("must provide a trace width")
+        self.gap = gap
+        self.length = length
+        self.substrate_width = substrate_width
+        if fcsx is None:
+            self.fcsx = tempfile.mkstemp()[1]
+        else:
+            self.fcsx = os.path.abspath(fcsx)
+
+        self.efield = efield
+        if fvtr_dir is None:
+            if efield:
+                self.fvtr_dir = tempfile.mkdtemp()
+        else:
+            self.fvtr_dir = os.path.abspath(fvtr_dir)
+            if os.path.exists(self.fvtr_dir):
+                rmtree(self.fvtr_dir)
+            os.mkdir(self.fvtr_dir)
+
+        self.unit = 1e-3
+        self.mesh = None
+        self.csx = None
+        self.vprobes = [None]
+        self.iprobes = [None]
+        # track simulation steps so that we don't reperform steps
+        self.sim_done = False
+        self.csx_done = False
+        self.freq_bins = None
+        self.fdtd = None
+
+    def sim(
+        self, num_freq_bins: int = 501, zero_trace_height: bool = False,
+    ):
+        """
+        Run an openems simulation for the current GCPW structure
+        and write the results to a file.
+
+        :param num_freq_bins: number of frequency bins.  More
+            frequency bins means longer simulation time but possibly
+            greater accuracy.
+        :param zero_trace_height: approximate trace height as 0.  This
+            can greatly reduce simulation time but may reduce
+            accuracy.
+        """
+        self.gen_csx(zero_trace_height=zero_trace_height)
+        tmpdir = tempfile.mkdtemp()
+        self.fdtd.Run(tmpdir, cleanup=True)
+
+        self.freq_bins = np.linspace(
+            self.f0 - self.fc, self.f0 + self.fc, num_freq_bins
+        )
+
+        for i, _ in enumerate(self.vprobes):
+            self.vprobes[i].calc_frequency_data(
+                sim_path=tmpdir, freq=self.freq_bins
+            )
+
+        for i, _ in enumerate(self.iprobes):
+            self.iprobes[i].calc_frequency_data(
+                sim_path=tmpdir, freq=self.freq_bins
+            )
+
+        self.calc_params()
+        self.sim_done = True
+        return np.absolute(self.z0)
+
+    def gen_csx(self, zero_trace_height: bool = False) -> None:
+        """
+        Generate CSX structure.
+
+        :param zero_trace_height: approximate trace height as 0.  This
+            can greatly reduce simulation time but may reduce
+            accuracy.  Args: num_probes: zero_trace_height:
+        """
+        # dimensions and parameters
+        lmin = C0 / ((self.f0 + self.fc) * self.unit)
+        if zero_trace_height:
+            trace_height = 0
+        else:
+            trace_height = self.pcb.layer_thickness[0]
+
+        # structures
+        self.csx = csxcad.ContinuousStructure()
+        metal = self.csx.AddMetal("PEC")
+        metal.AddBox(
+            priority=10,
+            start=[-self.length / 2, -self.width / 2, 0],
+            stop=[self.length / 2, self.width / 2, trace_height],
+        )
+        metal.AddBox(
+            priority=10,
+            start=[-self.length / 2, -self.substrate_width / 2, 0],
+            stop=[self.length / 2, -self.width / 2 - self.gap, trace_height],
+        )
+        metal.AddBox(
+            priority=10,
+            start=[-self.length / 2, self.width / 2 + self.gap, 0],
+            stop=[self.length / 2, self.substrate_width / 2, trace_height],
+        )
+        # vias
+        substrate = self.csx.AddMaterial(
+            "substrate",
+            epsilon=self.pcb.epsr_at_freq(self.f0),
+            kappa=self.pcb.sub_kappa,
+        )
+        substrate.AddBox(
+            priority=0,
+            start=[
+                -self.length / 2,
+                -self.substrate_width / 2,
+                -self.pcb.layer_sep[0],
+            ],
+            stop=[self.length / 2, self.substrate_width / 2, 0],
+        )
+
+        # simulation
+        self.fdtd = openems.openEMS(EndCriteria=1e-5)
+        self.fdtd.SetCSX(self.csx)
+        self.fdtd.SetGaussExcite(self.f0, self.fc)
+        self.fdtd.SetBoundaryCond(
+            ["PML_8", "PML_8", "MUR", "MUR", "PEC", "MUR"]
+        )
+
+        self.mesh = Mesh(
+            self.csx,
+            lmin,
+            mres=1 / 20,
+            sres=1 / 10,
+            smooth=1.4,
+            unit=self.unit,
+            min_lines=9,
+            expand_bounds=[0, 0, 10, 10, 0, 10],
+        )
+        self.mesh.generate_mesh()
+
+        _, port_xpos = self.mesh.nearest_mesh_line(0, -self.length / 4)
+        self.fdtd.AddLumpedPort(
+            port_nr=0,
+            R=self.z0_ref,
+            start=[port_xpos, -self.width / 2 - self.gap, 0],
+            stop=[port_xpos, -self.width / 2, self.pcb.layer_thickness[0]],
+            p_dir="y",
+            excite=1,
+            priority=999,
+        )
+        self.fdtd.AddLumpedPort(
+            port_nr=1,
+            R=self.z0_ref,
+            start=[port_xpos, self.width / 2 + self.gap, 0],
+            stop=[port_xpos, self.width / 2, self.pcb.layer_thickness[0]],
+            p_dir="y",
+            excite=1,
+            priority=999,
+        )
+
+        self.gen_probes(trace_height=trace_height)
+
+        # E-field recording
+        if self.efield:
+            Et = self.csx.AddDump(
+                os.path.join(self.fvtr_dir, "Et_"), file_type=0
+            )
+            start = [
+                -self.length / 2,
+                -self.substrate_width / 2,
+                -self.pcb.layer_sep[0] / 2,
+            ]
+            stop = [
+                self.length / 2,
+                self.substrate_width / 2,
+                -self.pcb.layer_sep[0] / 2,
+            ]
+            Et.AddBox(start, stop)
+
+        # write CSX file
+        self.csx.Write2XML(self.fcsx)
+        self.csx_done = True
+
+    def gen_probes(self, trace_height):
+        mid_idx, mid_xpos = self.mesh.nearest_mesh_line(0, 0)
+        vprobe_x_pos = [
+            self.mesh.mesh_lines[0][mid_idx - 1],
+            mid_xpos,
+            self.mesh.mesh_lines[0][mid_idx + 1],
+        ]
+        iprobe_x_pos = [
+            (vprobe_x_pos[0] + vprobe_x_pos[1]) / 2,
+            (vprobe_x_pos[1] + vprobe_x_pos[2]) / 2,
+        ]
+
+        self.vprobes = [None for i in range(len(vprobe_x_pos))]
+        self.iprobes = [None for i in range(len(iprobe_x_pos))]
+
+        for i, _ in enumerate(self.vprobes):
+            self.vprobes[i] = Probe(
+                name="ut_" + str(i),
+                csx=self.csx,
+                box=[
+                    [vprobe_x_pos[i], 0, -self.pcb.layer_sep[0]],
+                    [vprobe_x_pos[i], 0, 0],
+                ],
+                p_type=0,
+            )
+
+        for i, _ in enumerate(self.iprobes):
+            self.iprobes[i] = Probe(
+                name="it_" + str(i),
+                csx=self.csx,
+                box=[
+                    [iprobe_x_pos[i], -self.width / 2, 0],
+                    [iprobe_x_pos[i], self.width / 2, trace_height,],
+                ],
+                p_type=1,
+            )
+
+    def calc_params(self):
+        """
+        Calculate the transmission line characteristic impedance and
+        complex propagation constant.
+
+        Use tx line equations (see Pozar ch.2 for derivation):
+
+        ..  math:: dV/dz = -(R+jwL)I
+
+        ..  math:: dI/dz = -(G+jwC)V
+
+        ..  math:: Z0 = \sqrt{(R+jwL)/(G+jwC)}
+
+        ..  math:: \gamma = \sqrt{(R+jwL)(G+jwC)}
+
+        We have 3 voltage probes.  Take middle as V, and dV/dz from
+        1st to 3rd.  We have 2 current probes equidistant between the
+        voltage probes.  I is average of both and dI/dz is difference
+        from one to the other.
+        """
+        v = self.vprobes[1].f_data
+        i = 0.5 * (self.iprobes[0].f_data + self.iprobes[1].f_data)
+        dv = (self.vprobes[2].f_data - self.vprobes[0].f_data) / (
+            self.unit * (self.vprobes[2].box[0][0] - self.vprobes[0].box[0][0])
+        )
+        di = (self.iprobes[1].f_data - self.iprobes[0].f_data) / (
+            self.unit * (self.iprobes[1].box[0][0] - self.iprobes[0].box[0][0])
+        )
+        beta = np.sqrt(-dv * di / (i * v))
+        beta[
+            np.real(beta) < 0
+        ] *= -1  # determine correct sign (unlike the paper)
+        self.beta = beta
+
+        # determine ZL
+        self.z0 = np.sqrt(v * dv / (i * di))
+
+    def view_csx(self):
+        """
+        View CSX structure. This blocks the calling thread and AppCSXCAD
+        must be closed before proceeding.
+        """
+        if not self.csx_done:
+            raise RuntimeWarning(
+                "Must generate CSX before viewing it. Doing nothing."
+            )
+        else:
+            run(["AppCSXCAD", self.fcsx])
+
+    def view_efield(self):
+        """
+        View E-field time dump. This blocks the calling thread and
+        Paraview must be closed before proceeding.
+        """
+        if not self.sim_done:
+            raise RuntimeWarning(
+                "Must run simulation before viewing E-field dump. "
+                "Doing nothing."
+            )
+        else:
+            run(
+                [
+                    "paraview",
+                    "--data={}".format(
+                        os.path.join(self.fvtr_dir, "Et__..vtr")
+                    ),
+                ]
+            )
+
+
+def gcpw_sweep_width(
+    pcb: PCB,
+    f0: float,
+    fc: float,
+    z0_ref: float,
+    width: float = None,
+    gap: float = None,
+    width_dev_factor: float = 0.1,
+    num_points: int = 11,
+) -> List[Tuple[float, float]]:
+    """
+    Calculate microstrip characteristic impedance as a function of
+    trace width.
+
+    :param pcb: PCB object
+    :param f0: center frequency (Hz)
+    :param fc: corner frequency, given as difference from f0 (Hz)
+    :param z0_ref: desired impedance (ohm)
+    :param width: center width (mm).  If ommitted, find the best guess
+        width for f0 analytically.
+    :param width_dev_factor: determines width sweep bounds
+        [width*(1-wdf),width*(1+wdf)]
+    :param num_points: number of width values to calculate.  This
+        value has a significant effect on simulation time since each
+        point is calculated in its own thread.  Therefore, to minimize
+        computation time, its recommended to choose some multiple of
+        the number of cores available on the simulation machine.  The
+        total simulation time will be roughly equal to the time it
+        takes to compute 1 point times the ratio of the number of
+        points to number of machine cores.
+    :param fout: filename where results should be written.  relative
+        to current dir.
+
+    :returns: A list of tuples, where the first tuple element is a
+        width and the second is the corresponding impedance value.
+    """
+    if width is None:
+        raise ValueError("must provide width")
+    if gap is None:
+        raise ValueError("must provide width")
+
+    widths = np.linspace(
+        width * (1 - width_dev_factor),
+        width * (1 + width_dev_factor),
+        num_points,
+    )
+    gcpws = [None for i in range(num_points)]
+    for i, width in enumerate(widths):
+        gcpws[i] = GCPW(
+            pcb=pcb, f0=f0, fc=fc, z0_ref=z0_ref, width=width, gap=gap
+        )
+
+    pool = Pool(nodes=11)
+    freq_bins = 501
+    func = partial(GCPW.sim, num_freq_bins=freq_bins, zero_trace_height=False)
+    z0s = [None for i in range(num_points)]
+    z0s = list(pool.map(func, gcpws))
 
     ret_vals = [[None, None] for i in range(num_points)]
     for i, _ in enumerate(z0s):
