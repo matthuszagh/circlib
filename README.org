@@ -8,3 +8,122 @@ alongside each PCB implementation describing relevant quality factors
 several variants for different PCB materials. When dealing with
 sufficiently high frequencies, OpenEMS simulations are provided to
 justify the various layout decisions (e.g. trace width, etc.).
+
+* Rename
+I don't like libcircuit. Possible new names:
+
+I think circlib is currently the best.
+
+1. elib
+2. sklib (in reference to the skidl dependence)
+3. circlib
+4. partlib (although I think this would be better suited to a repo
+   focused on ICs and their attributes)
+5. softcirc (software-defined and configured circuits)
+6. pcircuits (programmable circuits). I think this name is a bit
+   misleading since a programmable circuit is a circuit that is
+   programmable, not one defined programmatically.
+7. circdb
+8. autocirc
+9. modcirc
+
+* organization
+Subcircuits are self-contained component collections providing useful
+functionality. They are also meant to be modular building blocks: a
+subcircuit is often composed of other subcircuits.
+
+Parts are interfaces to ICs that additionally contain information
+about that IC, such as pin voltage ranges, etc. Parts are frequently
+used by subcircuits.
+
+** Instantiating and connecting parts and subcircuits
+Should subcircuits extract attributes from their connections
+(e.g. power supply voltage indirectly from the power output that
+drives that net), or declaratively at construction? Basically, I see 2
+possibilities here:
+
+1. Have the user declare as little as possible and have information
+   extracted from the circuit.
+2. Make the user declare more, and then look for ERC violations and
+   conflicts.
+
+I think the second solution is better for the following reasons:
+
+1. It requires the user to state their intentions, which should result
+   in fewer suprises.
+2. It simplifies the code logic and reduces bugs.
+3. It allows detailed configuration in cases where data can't easily
+   be extracted from the pin connection.
+4. It allows you to view the hypothetical behavior of parts in
+   different configurations before connecting them up.
+
+* subcircuit modularity
+Subcircuits are composed of a set of modules. The goal behind this is
+that you should be able to tweak the behavior of a circuit by choosing
+a different, compatible module. Compatibility is determined by the set
+of module pins, or the module "interface".
+
+* design
+** goals
+1. Provide a large collection of useful circuits.
+2. Include detailed operating information for those circuits via
+   spice.
+3. Make circuit selection based on goals (e.g. I'd like a voltage
+   amplifier with such and such characteristics).
+4. Circuits can often be configured in a number of variations. The
+   instantiator should be able to use these variations without
+   defining a full new circuit. In that sense, the circuit should be
+   modular, allowing pieces to be swapped out.
+
+The most difficult design goal will be to be maximally helpful without
+limiting the user. Maximally helpful means providing as many finished
+circuits as possible. Limiting the user means making it difficult for
+the user to define their own circuit in a way I didn't foresee.
+
+** organization
+The top-level circuit organization is a set of abstract classes for
+general categories of circuits that provide a specific
+purpose. Several such examples are
+
+1. single-ended amplifier
+2. differential amplifier
+3. voltage reference
+4. etc.
+
+The abstract class specifies a set of abstract member functions that
+must be defined by all child classes. These functions return operating
+information about the circuit based on the chosen configuration
+(e.g. gain or input impedance, etc.). They generally delegate to spice
+simulations to retrieve the information.
+
+This top-level class also contains an abstract ~construct~ method
+whose arguments are zero or more objects of ~Net~ type. These nets
+define the primary interface. Every subclass of this abstract class
+must use these nets. Additionally, there is a secondary interface for
+nets particular to specific subclasses. To support this, the construct
+method can also take any number of additional nets for circuits
+requiring them. One example of this is the L7980 switching regulator,
+which has a synchronization pin that allows the phase of two
+regulators to be offset by 180 degrees.
+
+The final circuit subclasses should be composed of modules allowing
+variants to tweak the circuit behavior.
+
+All individual components should allow complete configurability of the
+part and simulation model. An example of this is when you'd like the
+simulation to include the parasitic effects of a capacitor. You can
+reach into the circuit object, provide a parasitic model of the
+capacitor, and use that model in all simulations of the circuit. The
+semi-independence of the component and simulation means, however, that
+the actual instantiated circuit will still just be a capacitor
+(e.g. there will not be an added inductor).
+
+All final circuits should be able to generate a schematic
+representation of themselves. This should probably be done with
+netlistsvg instead of circuitikz, since netlistsvg is automatic.
+
+The user should be able to override a module and still get the
+auto-setting capability of the circuit for the other components. For
+instance, if the user sets the top resistor in a resistive voltage
+divider to 10k, we should still be able to intelligently choose the
+lower resistor.

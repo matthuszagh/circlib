@@ -1,37 +1,30 @@
-{ nixpkgs ? (import <nixpkgs> {})
+{ nixpkgs ? (import (builtins.fetchTarball {
+  name = "matthuszagh-nixpkgs-pyspice-2020-05-23";
+  url = "https://github.com/matthuszagh/nixpkgs/archive/8516c750b95b0b97538445df84f264ba67792834.tar.gz";
+  sha256 = "0fhg3878dj0ql7nzsmqawnf1q0xr22zabch977ffvi647ly3ga64";
+}) {})
 }:
 
 let
   custompkgs = import <custompkgs> {};
-  pkgs = (nixpkgs // custompkgs);
-  libcircuit = pkgs.libcircuit;
-  mh-python = pkgs.python3.withPackages (ps: with ps; [
-    numpy
-    matplotlib
-    pathos
-    scipy
-  ] ++ (with custompkgs; [
-    libcircuit
-    skidl
-    automesh
-  ]));
-  kicad = pkgs.kicad;
+  pkgs = nixpkgs;
+  pythonEnv = (pkgs.python3Full.buildEnv.override {
+    extraLibs = with pkgs.python3Packages; [
+      numpy
+      matplotlib
+      pathos
+      scipy
+    ] ++ (with custompkgs; [
+      circlib
+    ]);
+    ignoreCollisions = true;
+  });
 in
 pkgs.mkShell rec {
   buildInputs = with pkgs; [
-    python3Full
-    mh-python
-    python-openems
-    python-csxcad
-
-    # pcb cad
-    kicad
-
-    # ems
-    (openems.override {withMPI = false; })
-    appcsxcad
-    hyp2mat
+    pythonEnv
+    qucs
   ];
 
-  KICAD_SYMBOL_DIR="${kicad.out}/share/kicad/library";
+  KICAD_SYMBOL_DIR="/home/matt/src/kicad-symbols";
 }
