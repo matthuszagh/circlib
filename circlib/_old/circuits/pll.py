@@ -131,7 +131,7 @@ class Type2PhaseDetector(BaseCircuit):
         raise NotImplementedError("Cad not yet implemented.")
 
     @subcircuit
-    def spice(self):
+    def spice(self, current_gain=1e-3):
         """
         :returns: [fref, fvco, vout, vcc, gnd]
         """
@@ -185,8 +185,8 @@ class Type2PhaseDetector(BaseCircuit):
                 input_load=1e-12,
             ),
         )
-        self.isourcet = Part("pyspice", "G", current_gain=3e-3)
-        self.isourceb = Part("pyspice", "G", current_gain=3e-3)
+        self.isourcet = Part("pyspice", "G", current_gain=current_gain)
+        self.isourceb = Part("pyspice", "G", current_gain=current_gain)
         self.limit = Part(
             "pyspice",
             "A",
