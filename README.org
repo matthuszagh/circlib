@@ -9,24 +9,6 @@ several variants for different PCB materials. When dealing with
 sufficiently high frequencies, OpenEMS simulations are provided to
 justify the various layout decisions (e.g. trace width, etc.).
 
-* Rename
-I don't like libcircuit. Possible new names:
-
-I think circlib is currently the best.
-
-1. elib
-2. sklib (in reference to the skidl dependence)
-3. circlib
-4. partlib (although I think this would be better suited to a repo
-   focused on ICs and their attributes)
-5. softcirc (software-defined and configured circuits)
-6. pcircuits (programmable circuits). I think this name is a bit
-   misleading since a programmable circuit is a circuit that is
-   programmable, not one defined programmatically.
-7. circdb
-8. autocirc
-9. modcirc
-
 * organization
 Subcircuits are self-contained component collections providing useful
 functionality. They are also meant to be modular building blocks: a
